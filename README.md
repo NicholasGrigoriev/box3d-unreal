@@ -8,9 +8,10 @@ UnrealBuildTool; the plugin is fully standalone with no external build steps.
 
 ## Status
 
-**Alpha / M0.** The library compiles inside UE, a physics world is created per game
-world and stepped at a fixed timestep. See [docs/MILESTONES.md](docs/MILESTONES.md)
-for the roadmap and [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions.
+**Alpha / M0 complete.** The library compiles inside UE, a physics world is created
+per game world and stepped at a fixed timestep (verified headless). Next up: M1 —
+rigid bodies as components. See [docs/MILESTONES.md](docs/MILESTONES.md) for the
+roadmap and [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions.
 
 ## Install
 

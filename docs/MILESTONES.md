@@ -7,18 +7,22 @@ Status legend: `[ ]` planned · `[~]` in progress · `[x]` done
 
 ---
 
-## M0 — Foundation (compiles, world steps)
+## M0 — Foundation (compiles, world steps) ✅ 2026-07-06
 
 Goal: the plugin builds inside UE 5.7 and can create, step, and destroy a Box3D world.
 
 - [x] Analyze box3d v0.1.0 source, API, and build requirements
-- [~] Vendor box3d `include/` + `src/` into `Box3DCore` module, compiled by UBT as C17
-- [~] `Box3DRuntime` module: allocator hook (`FMemory`), assert hook (`ensure`/log), log hook (`UE_LOG`)
-- [~] `UBox3DWorldSubsystem`: world lifecycle + fixed-timestep stepping with accumulator
-- [~] `UBox3DSettings` developer settings (gravity, substeps, hertz, worker count)
-- [~] Smoke test: `box3d.Smoke` console command — falling bodies over a static ground,
+- [x] Vendor box3d `include/` + `src/` into `Box3DCore` module, compiled by UBT as C17
+- [x] `Box3DRuntime` module: allocator hook (`FMemory`), assert hook (`ensure`/log), log hook (`UE_LOG`)
+- [x] `UBox3DWorldSubsystem`: world lifecycle + fixed-timestep stepping with accumulator
+- [x] `UBox3DSettings` developer settings (gravity, substeps, hertz, worker count)
+- [x] Smoke test: `box3d.Smoke` console command — falling bodies over a static ground,
       visualized with debug draw, verifying the full create/step/read-back loop
-- [~] Private GitHub repo, clean history
+- [x] Private GitHub repo, clean history
+
+Verified headless (`-game -nullrhi`): world created per game world, transient world
+destroyed cleanly, `Box3D stepping: 60 fixed steps done` heartbeat in log. Visual
+`box3d.Smoke` check in PIE still worth an eyeball.
 
 ## M1 — Rigid bodies as components
 
