@@ -1,9 +1,11 @@
 #include "Box3DBodyComponent.h"
 
 #include "Box3DConversion.h"
+#include "Box3DCooking.h"
 #include "Box3DRuntime.h"
 #include "Box3DWorldSubsystem.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "box3d/box3d.h"
@@ -127,26 +129,63 @@ void UBox3DBodyComponent::CreateShape(const FVector& WorldScale)
 		b3CreateCapsuleShape(BodyId, &ShapeDef, &Capsule);
 		break;
 	}
+	case EBox3DShapeType::ConvexHull:
+	case EBox3DShapeType::TriangleMesh:
+	{
+		const UStaticMeshComponent* MeshComponent = Cast<UStaticMeshComponent>(FindSourcePrimitive());
+		UStaticMesh* Mesh = MeshComponent ? MeshComponent->GetStaticMesh() : nullptr;
+		if (Mesh == nullptr)
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("%s: %s shape needs an attached static mesh component; no shape created"),
+				*GetPathName(), ShapeType == EBox3DShapeType::TriangleMesh ? TEXT("TriangleMesh") : TEXT("ConvexHull"));
+			return;
+		}
+
+		// Geometry comes from the mesh, so use the mesh component's scale. Any
+		// relative offset/rotation between it and this component is ignored.
+		const b3Vec3 MeshScale = Box3D::ToB3Dir(MeshComponent->GetComponentTransform().GetScale3D());
+
+		bool bUseMesh = ShapeType == EBox3DShapeType::TriangleMesh;
+		if (bUseMesh && BodyType != EBox3DBodyType::Static)
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("%s: TriangleMesh only contacts on static bodies; using ConvexHull instead"),
+				*GetPathName());
+			bUseMesh = false;
+		}
+
+		if (bUseMesh)
+		{
+			if (const b3MeshData* MeshData = Box3D::GetOrCreateMeshData(Mesh))
+			{
+				b3CreateMeshShape(BodyId, &ShapeDef, MeshData, MeshScale);
+			}
+		}
+		else if (const b3HullData* Hull = Box3D::GetOrCreateHullData(Mesh))
+		{
+			b3CreateTransformedHullShape(BodyId, &ShapeDef, Hull, b3Transform{ { 0, 0, 0 }, { { 0, 0, 0 }, 1.0f } }, MeshScale);
+		}
+		break;
+	}
 	}
 }
 
-bool UBox3DBodyComponent::TryAutoFitShape()
+const UPrimitiveComponent* UBox3DBodyComponent::FindSourcePrimitive() const
 {
 	// Nearest attached primitive: first child, else the attach parent. Any local
-	// offset or rotation between it and this component is ignored in M1.
-	const UPrimitiveComponent* Primitive = nullptr;
+	// offset or rotation between it and this component is ignored.
 	for (const USceneComponent* Child : GetAttachChildren())
 	{
 		if (const UPrimitiveComponent* ChildPrim = Cast<UPrimitiveComponent>(Child))
 		{
-			Primitive = ChildPrim;
-			break;
+			return ChildPrim;
 		}
 	}
-	if (Primitive == nullptr)
-	{
-		Primitive = Cast<UPrimitiveComponent>(GetAttachParent());
-	}
+	return Cast<UPrimitiveComponent>(GetAttachParent());
+}
+
+bool UBox3DBodyComponent::TryAutoFitShape()
+{
+	const UPrimitiveComponent* Primitive = FindSourcePrimitive();
 	if (Primitive == nullptr)
 	{
 		UE_LOG(LogBox3D, Warning, TEXT("%s: bAutoFitShape found no attached primitive, using explicit extents"),
@@ -169,6 +208,8 @@ bool UBox3DBodyComponent::TryAutoFitShape()
 		CapsuleRadius = FMath::Max(WorldExtent.X, WorldExtent.Y);
 		CapsuleHalfHeight = WorldExtent.Z;
 		break;
+	default:
+		break; // mesh-derived shapes take geometry, not fitted extents
 	}
 	return true;
 }

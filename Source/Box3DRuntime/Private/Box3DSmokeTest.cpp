@@ -75,7 +75,8 @@ namespace
 
 		UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
 		UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-		if (CubeMesh == nullptr || SphereMesh == nullptr)
+		UStaticMesh* CylinderMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+		if (CubeMesh == nullptr || SphereMesh == nullptr || CylinderMesh == nullptr)
 		{
 			UE_LOG(LogBox3D, Error, TEXT("box3d.SmokeActors: engine basic shape meshes not found"));
 			return;
@@ -91,15 +92,17 @@ namespace
 		const FVector Center = ViewLocation + Forward * 600.0;
 
 		// Static ground slab: 20 m x 20 m x 0.5 m cube, top 3 m below the view.
+		// TriangleMesh on purpose: exercises the mesh cooker with non-uniform scale.
 		const FVector GroundScale(20.0, 20.0, 0.5);
 		const FVector GroundCenter(Center.X, Center.Y, ViewLocation.Z - 300.0 - 25.0);
 		if (AActor* Ground = SpawnBox3DMeshActor(World, CubeMesh, FTransform(GroundCenter), GroundScale,
-			EBox3DBodyType::Static, EBox3DShapeType::Box))
+			EBox3DBodyType::Static, EBox3DShapeType::TriangleMesh))
 		{
 			GSmokeActors.Add(Ground);
 		}
 
-		// Dynamic bodies: 50 cm cubes and spheres in a jittered grid above the slab.
+		// Dynamic bodies: 50 cm cubes, spheres, and convex-hull cylinders in a
+		// jittered grid above the slab.
 		const int32 Columns = FMath::CeilToInt32(FMath::Sqrt(static_cast<float>(Count)));
 		const double Spacing = 70.0;
 		const double GridOffset = 0.5 * (Columns - 1) * Spacing;
@@ -117,10 +120,20 @@ namespace
 				GroundTopZ + 200.0 + Layer * 120.0);
 			const FQuat Rotation = FRotator(FMath::FRandRange(0.f, 30.f), FMath::FRandRange(0.f, 360.f), 0.f).Quaternion();
 
-			const bool bBox = (Index % 2 == 0);
-			if (AActor* Actor = SpawnBox3DMeshActor(World, bBox ? CubeMesh : SphereMesh,
-				FTransform(Rotation, Position), FVector(0.5),
-				EBox3DBodyType::Dynamic, bBox ? EBox3DShapeType::Box : EBox3DShapeType::Sphere))
+			UStaticMesh* Mesh = CubeMesh;
+			EBox3DShapeType Shape = EBox3DShapeType::Box;
+			if (Index % 3 == 1)
+			{
+				Mesh = SphereMesh;
+				Shape = EBox3DShapeType::Sphere;
+			}
+			else if (Index % 3 == 2)
+			{
+				Mesh = CylinderMesh;
+				Shape = EBox3DShapeType::ConvexHull;
+			}
+			if (AActor* Actor = SpawnBox3DMeshActor(World, Mesh, FTransform(Rotation, Position), FVector(0.5),
+				EBox3DBodyType::Dynamic, Shape))
 			{
 				GSmokeActors.Add(Actor);
 			}
@@ -173,6 +186,14 @@ namespace
 			SampleLocation + FVector(0, 0, 300), SampleLocation - FVector(0, 0, 300), Filter, Hit);
 		UE_LOG(LogBox3D, Log, TEXT("box3d.SmokeActors: query check — ray %s at Z=%.1f on %s"),
 			bRayHit ? TEXT("hit") : TEXT("MISSED"), Hit.Location.Z, *GetNameSafe(Hit.Actor));
+
+		// Clear of the grid, straight onto the triangle-mesh ground: exact top Z
+		// proves mesh cooking units and non-uniform scale.
+		FBox3DHitResult GroundHit;
+		const bool bGroundHit = UBox3DQueryLibrary::Box3DRayCast(World,
+			SampleLocation + FVector(600, 600, 300), SampleLocation + FVector(600, 600, -300), Filter, GroundHit);
+		UE_LOG(LogBox3D, Log, TEXT("box3d.SmokeActors: query check — mesh ground ray %s at Z=%.1f (tri=%d)"),
+			bGroundHit ? TEXT("hit") : TEXT("MISSED"), GroundHit.Location.Z, GroundHit.TriangleIndex);
 
 		const TArray<UBox3DBodyComponent*> Overlaps = UBox3DQueryLibrary::Box3DOverlapSphere(World,
 			SampleLocation, 200.0f, Filter);

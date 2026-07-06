@@ -1,5 +1,6 @@
 #include "Box3DRuntime.h"
 
+#include "Box3DCooking.h"
 #include "Modules/ModuleManager.h"
 #include "box3d/box3d.h"
 
@@ -48,6 +49,9 @@ public:
 
 	virtual void ShutdownModule() override
 	{
+		// All worlds (and therefore all shapes referencing cooked data) are gone by now.
+		Box3D::FlushCookedDataCaches();
+
 		if (const int32 LeakedBytes = b3GetByteCount(); LeakedBytes != 0)
 		{
 			UE_LOG(LogBox3D, Warning, TEXT("Box3D shutdown with %d bytes still allocated"), LeakedBytes);

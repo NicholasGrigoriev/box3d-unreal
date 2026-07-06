@@ -27,6 +27,13 @@ enum class EBox3DShapeType : uint8
 	Box,
 	Sphere,
 	Capsule,
+	/// Convex hull cooked from the attached static mesh (authored convex collision
+	/// if present, else simplified render geometry).
+	ConvexHull,
+	/// Exact triangle mesh from the attached static mesh's LOD0 render geometry.
+	/// Static bodies only (box3d mesh collision contacts static bodies only);
+	/// dynamic/kinematic bodies fall back to ConvexHull with a warning.
+	TriangleMesh,
 };
 
 /// Axes on which the body's motion is locked (world axes).
@@ -228,6 +235,10 @@ private:
 	/// Resolve auto-fit extents from the nearest attached primitive into the explicit
 	/// extent properties. Returns false if no primitive was found.
 	bool TryAutoFitShape();
+
+	/// The nearest attached primitive (first child, else attach parent) that shape
+	/// geometry and auto-fit are derived from.
+	const UPrimitiveComponent* FindSourcePrimitive() const;
 
 	b3BodyId BodyId = {};
 

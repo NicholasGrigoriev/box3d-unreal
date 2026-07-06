@@ -18,6 +18,8 @@ public class Box3DRuntime : ModuleRules
 			"Engine",
 			"DeveloperSettings",
 			"PhysicsCore",
+			"RenderCore",
+			"RHI",
 		});
 	}
 }
