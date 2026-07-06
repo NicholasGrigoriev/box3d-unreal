@@ -2,15 +2,37 @@
 
 #include "Box3DBodyComponent.h"
 #include "Box3DConversion.h"
+#include "Box3DDebugDraw.h"
 #include "Box3DJointComponent.h"
 #include "Box3DRuntime.h"
 #include "Box3DSettings.h"
+#include "Box3DTaskSystem.h"
 #include "Box3DTypes.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "box3d/box3d.h"
 #include "box3d/collision.h"
+
+// `stat box3d`. Cycle stats time our game-thread work; float/dword counters mirror
+// box3d's own per-step profile and world counters.
+DECLARE_STATS_GROUP(TEXT("Box3D"), STATGROUP_Box3D, STATCAT_Advanced);
+DECLARE_CYCLE_STAT(TEXT("Tick (game thread)"), STAT_Box3DTick, STATGROUP_Box3D);
+DECLARE_FLOAT_COUNTER_STAT(TEXT("Step (ms)"), STAT_Box3DStepMs, STATGROUP_Box3D);
+DECLARE_FLOAT_COUNTER_STAT(TEXT("Pairs (ms)"), STAT_Box3DPairsMs, STATGROUP_Box3D);
+DECLARE_FLOAT_COUNTER_STAT(TEXT("Collide (ms)"), STAT_Box3DCollideMs, STATGROUP_Box3D);
+DECLARE_FLOAT_COUNTER_STAT(TEXT("Solve (ms)"), STAT_Box3DSolveMs, STATGROUP_Box3D);
+DECLARE_FLOAT_COUNTER_STAT(TEXT("Tree refit (ms)"), STAT_Box3DRefitMs, STATGROUP_Box3D);
+DECLARE_FLOAT_COUNTER_STAT(TEXT("Transforms (ms)"), STAT_Box3DTransformsMs, STATGROUP_Box3D);
+DECLARE_FLOAT_COUNTER_STAT(TEXT("Sensors (ms)"), STAT_Box3DSensorsMs, STATGROUP_Box3D);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Bodies"), STAT_Box3DBodies, STATGROUP_Box3D);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Awake bodies"), STAT_Box3DAwakeBodies, STATGROUP_Box3D);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Shapes"), STAT_Box3DShapes, STATGROUP_Box3D);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Contacts"), STAT_Box3DContacts, STATGROUP_Box3D);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Joints"), STAT_Box3DJoints, STATGROUP_Box3D);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Islands"), STAT_Box3DIslands, STATGROUP_Box3D);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Solver tasks"), STAT_Box3DTasks, STATGROUP_Box3D);
+DECLARE_MEMORY_STAT(TEXT("World memory"), STAT_Box3DMemory, STATGROUP_Box3D);
 
 void UBox3DWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -25,12 +47,27 @@ void UBox3DWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Def.hitEventThreshold = Settings->HitEventThreshold * Box3D::UEToMeters;
 	Def.workerCount = static_cast<uint32>(Settings->WorkerCount);
 
+	if (Settings->WorkerCount > 1 && Settings->TaskSystem == EBox3DTaskSystem::UnrealTasks)
+	{
+		TaskPool = MakePimpl<FBox3DUETaskPool>();
+		TaskPool->ApplyToWorldDef(Def, Settings->WorkerCount);
+	}
+
+	// Registered unconditionally: box3d only calls back when a shape is first
+	// drawn, so the cache is free until box3d.DebugDraw is turned on.
+	DebugDrawer = MakePimpl<FBox3DDebugDrawer>();
+	Def.createDebugShape = &FBox3DDebugDrawer::CreateShapeThunk;
+	Def.destroyDebugShape = &FBox3DDebugDrawer::DestroyShapeThunk;
+	Def.userDebugShapeContext = DebugDrawer.Get();
+
 	WorldId = b3CreateWorld(&Def);
 	Accumulator = 0.0f;
 	StepCount = 0;
 
-	UE_LOG(LogBox3D, Log, TEXT("Box3D world created for %s (gravity=%s cm/s^2, workers=%d)"),
-		*GetNameSafe(GetWorld()), *Settings->Gravity.ToCompactString(), Settings->WorkerCount);
+	UE_LOG(LogBox3D, Log, TEXT("Box3D world created for %s (gravity=%s cm/s^2, workers=%d, scheduler=%s)"),
+		*GetNameSafe(GetWorld()), *Settings->Gravity.ToCompactString(), Settings->WorkerCount,
+		Settings->WorkerCount <= 1 ? TEXT("serial")
+			: (TaskPool ? TEXT("UE tasks") : TEXT("box3d internal")));
 }
 
 void UBox3DWorldSubsystem::Deinitialize()
@@ -47,6 +84,11 @@ void UBox3DWorldSubsystem::Deinitialize()
 	}
 	WorldId = b3WorldId{};
 
+	// After the world: destroying it fires destroyDebugShape into the drawer, and
+	// task handles must not outlive their pool.
+	DebugDrawer.Reset();
+	TaskPool.Reset();
+
 	Super::Deinitialize();
 }
 
@@ -57,6 +99,7 @@ bool UBox3DWorldSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType
 
 void UBox3DWorldSubsystem::Tick(float DeltaTime)
 {
+	SCOPE_CYCLE_COUNTER(STAT_Box3DTick);
 	Super::Tick(DeltaTime);
 
 	if (!b3World_IsValid(WorldId))
@@ -89,6 +132,13 @@ void UBox3DWorldSubsystem::Tick(float DeltaTime)
 		SyncMovedBodies();
 	}
 
+	UpdateStats();
+
+	if (FBox3DDebugDrawer::IsDrawEnabled())
+	{
+		DrawDebugWorld();
+	}
+
 #if !UE_BUILD_SHIPPING
 	DrawSmokeBodies();
 #endif
@@ -101,6 +151,10 @@ TStatId UBox3DWorldSubsystem::GetStatId() const
 
 void UBox3DWorldSubsystem::StepFixed(float FixedDeltaTime, int32 SubSteps)
 {
+	if (TaskPool.IsValid())
+	{
+		TaskPool->ResetForStep();
+	}
 	b3World_Step(WorldId, FixedDeltaTime, SubSteps);
 	++StepCount;
 
@@ -265,6 +319,61 @@ void UBox3DWorldSubsystem::SyncMovedBodies()
 			Component->SyncTransformFromPhysics(Box3D::ToUEPos(Move.transform.p), Box3D::ToUE(Move.transform.q));
 		}
 	}
+}
+
+FBox3DWorldStats UBox3DWorldSubsystem::GetWorldStats() const
+{
+	FBox3DWorldStats Stats;
+	if (!b3World_IsValid(WorldId))
+	{
+		return Stats;
+	}
+
+	const b3Profile Profile = b3World_GetProfile(WorldId);
+	const b3Counters Counters = b3World_GetCounters(WorldId);
+
+	Stats.StepMs = Profile.step;
+	Stats.PairsMs = Profile.pairs;
+	Stats.CollideMs = Profile.collide;
+	Stats.SolveMs = Profile.solve;
+	Stats.BodyCount = Counters.bodyCount;
+	Stats.ShapeCount = Counters.shapeCount;
+	Stats.ContactCount = Counters.contactCount;
+	Stats.JointCount = Counters.jointCount;
+	Stats.IslandCount = Counters.islandCount;
+	Stats.AwakeBodyCount = b3World_GetAwakeBodyCount(WorldId);
+	Stats.TaskCount = Counters.taskCount;
+	Stats.MemoryBytes = Counters.byteCount;
+	return Stats;
+}
+
+void UBox3DWorldSubsystem::UpdateStats() const
+{
+#if STATS
+	const b3Profile Profile = b3World_GetProfile(WorldId);
+	const b3Counters Counters = b3World_GetCounters(WorldId);
+
+	SET_FLOAT_STAT(STAT_Box3DStepMs, Profile.step);
+	SET_FLOAT_STAT(STAT_Box3DPairsMs, Profile.pairs);
+	SET_FLOAT_STAT(STAT_Box3DCollideMs, Profile.collide);
+	SET_FLOAT_STAT(STAT_Box3DSolveMs, Profile.solve);
+	SET_FLOAT_STAT(STAT_Box3DRefitMs, Profile.refit);
+	SET_FLOAT_STAT(STAT_Box3DTransformsMs, Profile.transforms);
+	SET_FLOAT_STAT(STAT_Box3DSensorsMs, Profile.sensors);
+	SET_DWORD_STAT(STAT_Box3DBodies, Counters.bodyCount);
+	SET_DWORD_STAT(STAT_Box3DAwakeBodies, b3World_GetAwakeBodyCount(WorldId));
+	SET_DWORD_STAT(STAT_Box3DShapes, Counters.shapeCount);
+	SET_DWORD_STAT(STAT_Box3DContacts, Counters.contactCount);
+	SET_DWORD_STAT(STAT_Box3DJoints, Counters.jointCount);
+	SET_DWORD_STAT(STAT_Box3DIslands, Counters.islandCount);
+	SET_DWORD_STAT(STAT_Box3DTasks, Counters.taskCount);
+	SET_MEMORY_STAT(STAT_Box3DMemory, Counters.byteCount);
+#endif
+}
+
+void UBox3DWorldSubsystem::DrawDebugWorld() const
+{
+	DebugDrawer->Draw(GetWorld(), WorldId);
 }
 
 #if !UE_BUILD_SHIPPING

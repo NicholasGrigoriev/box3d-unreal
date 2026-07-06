@@ -2,11 +2,65 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
+#include "Templates/PimplPtr.h"
 #include "box3d/id.h"
 #include "Box3DWorldSubsystem.generated.h"
 
 class UBox3DBodyComponent;
 class UBox3DJointComponent;
+class FBox3DUETaskPool;
+class FBox3DDebugDrawer;
+
+/// Snapshot of box3d's per-step profile and simulation counters, readable from
+/// Blueprint. Times describe the most recent fixed step, in milliseconds. The
+/// same data feeds `stat box3d`.
+USTRUCT(BlueprintType)
+struct FBox3DWorldStats
+{
+	GENERATED_BODY()
+
+	/// Whole b3World_Step, ms.
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D")
+	float StepMs = 0.0f;
+
+	/// Broad-phase pair generation, ms.
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D")
+	float PairsMs = 0.0f;
+
+	/// Narrow-phase collision, ms.
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D")
+	float CollideMs = 0.0f;
+
+	/// Constraint solver, ms.
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D")
+	float SolveMs = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D")
+	int32 BodyCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D")
+	int32 ShapeCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D")
+	int32 ContactCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D")
+	int32 JointCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D")
+	int32 IslandCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D")
+	int32 AwakeBodyCount = 0;
+
+	/// Solver tasks spawned during the last step (0 when single-threaded).
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D")
+	int32 TaskCount = 0;
+
+	/// Bytes of memory held by the physics world.
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D")
+	int64 MemoryBytes = 0;
+};
 
 /// Owns one Box3D world per game/PIE UWorld and steps it at a fixed timestep.
 ///
@@ -37,6 +91,19 @@ public:
 	/// Number of fixed steps performed since world creation.
 	uint64 GetStepCount() const { return StepCount; }
 
+	/// Profile times (last fixed step) and simulation counters. Zeroed when the
+	/// physics world does not exist.
+	UFUNCTION(BlueprintCallable, Category = "Box3D")
+	FBox3DWorldStats GetWorldStats() const;
+
+	/// UE task pool driving the solver, or null when stepping single-threaded /
+	/// via box3d's internal scheduler.
+	const FBox3DUETaskPool* GetTaskPool() const { return TaskPool.Get(); }
+
+	/// Debug-shape wireframe cache; always registered with the world (populated
+	/// lazily on first draw, so it costs nothing until debug draw is used).
+	FBox3DDebugDrawer* GetDebugDrawer() const { return DebugDrawer.Get(); }
+
 	/// Kinematic bodies receive velocity-based transform targets before each fixed
 	/// step (b3Body_SetTargetTransform), so they collide smoothly instead of
 	/// teleporting. Body components register themselves on creation.
@@ -65,9 +132,24 @@ private:
 	/// after every fixed step because box3d buffers events per step only.
 	void PumpEvents();
 
+	/// Publish profile/counter values to `stat box3d` (compiled out without STATS).
+	void UpdateStats() const;
+
+	/// CVar-gated b3World_Draw pass (box3d.DebugDraw) using DrawDebugHelpers.
+	void DrawDebugWorld() const;
+
 	b3WorldId WorldId = {};
 	float Accumulator = 0.0f;
 	uint64 StepCount = 0;
+
+	/// Bridges solver tasks onto UE worker threads (Settings: WorkerCount > 1 with
+	/// TaskSystem == UnrealTasks). Must outlive the b3 world. TPimplPtr because the
+	/// type lives in a private header the UHT-generated code cannot see.
+	TPimplPtr<FBox3DUETaskPool> TaskPool;
+
+	/// Owns cached debug wireframes; box3d calls back into it when shapes are
+	/// first drawn and when they are destroyed. Must outlive the b3 world.
+	TPimplPtr<FBox3DDebugDrawer> DebugDrawer;
 
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> KinematicBodies;
 	TArray<TWeakObjectPtr<UBox3DJointComponent>> PendingJoints;

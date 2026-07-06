@@ -4,6 +4,16 @@
 #include "Engine/DeveloperSettings.h"
 #include "Box3DSettings.generated.h"
 
+/// Which scheduler runs box3d's solver tasks when WorkerCount > 1.
+UENUM()
+enum class EBox3DTaskSystem : uint8
+{
+	/// UE::Tasks — solver tasks run on the engine's shared worker threads.
+	UnrealTasks,
+	/// box3d's built-in scheduler — dedicated threads owned by the physics world.
+	Box3DInternal,
+};
+
 /// Project settings for the Box3D physics integration.
 /// Edit in Project Settings > Plugins > Box3D, saved to DefaultGame.ini.
 UCLASS(config = Game, defaultconfig, meta = (DisplayName = "Box3D"))
@@ -47,9 +57,15 @@ public:
 	UPROPERTY(EditAnywhere, config, Category = "World", meta = (ClampMin = "0"))
 	float HitEventThreshold = 100.0f;
 
-	/// Worker threads for the solver. 1 = single-threaded (current default; the
-	/// UE task-system hookup is a later milestone). Values above 1 use Box3D's
-	/// internal scheduler threads.
+	/// Worker threads for the solver. 1 = single-threaded. box3d performs best on
+	/// performance cores sharing an L2 cache; going past the physical core count
+	/// buys nothing. Run `box3d.Benchmark` to size this for a target machine.
 	UPROPERTY(EditAnywhere, config, Category = "Performance", meta = (ClampMin = "1", ClampMax = "16"))
 	int32 WorkerCount = 1;
+
+	/// Scheduler used when WorkerCount > 1. UnrealTasks shares the engine's worker
+	/// threads (no extra threads, coexists with rendering/audio work); Box3DInternal
+	/// spins up dedicated threads that only serve physics.
+	UPROPERTY(EditAnywhere, config, Category = "Performance")
+	EBox3DTaskSystem TaskSystem = EBox3DTaskSystem::UnrealTasks;
 };
