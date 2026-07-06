@@ -23,9 +23,12 @@ bool FBox3DConversionLengthScaleTest::RunTest(const FString& Parameters)
 	const FVector RoundTrip = Box3D::ToUE(B3);
 	TestTrue(TEXT("cm->m->cm round trip"), RoundTrip.Equals(V, 0.001));
 
+	// Bit-identical in single precision; within one float ULP when b3Pos is
+	// double (BOX3D_DOUBLE_PRECISION), where the seam keeps the extra bits.
 	const b3Pos Pos = Box3D::ToB3Pos(V);
-	TestTrue(TEXT("b3Pos seam matches b3Vec3 in single precision"),
-		FMath::IsNearlyEqual(Pos.x, B3.x) && FMath::IsNearlyEqual(Pos.y, B3.y) && FMath::IsNearlyEqual(Pos.z, B3.z));
+	TestTrue(TEXT("b3Pos seam matches b3Vec3"),
+		FMath::IsNearlyEqual(float(Pos.x), B3.x, 1.0e-6f) && FMath::IsNearlyEqual(float(Pos.y), B3.y, 1.0e-6f) &&
+		FMath::IsNearlyEqual(float(Pos.z), B3.z, 1.0e-6f));
 	TestTrue(TEXT("pos round trip"), Box3D::ToUEPos(Pos).Equals(V, 0.001));
 
 	const b3Vec3 Accel = Box3D::ToB3Accel(FVector(0.0, 0.0, -980.0));

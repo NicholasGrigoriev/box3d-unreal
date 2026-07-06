@@ -97,6 +97,27 @@ fully serial. `box3d.Benchmark` compares the three configurations on a target ma
 The step is deterministic across worker counts and schedulers
 (`Box3DUnreal.Threading.SchedulerEquivalence` pins this).
 
+## Continuous collision (fast movers)
+
+`UBox3DSettings::bEnableContinuous` (default on) makes box3d sweep fast bodies
+against **static** geometry, so projectiles at hundreds of m/s stop on thin walls
+with no configuration (`World.ContinuousFastBody` pins 150 m/s vs a 4 cm plate).
+Set `bIsBullet` on a body component only when it must not tunnel through **thin
+dynamic** objects — bullets are swept against dynamic shapes too, which costs
+more, so reserve the flag for genuine projectiles. Speeds are capped by box3d at
+400 m/s (`b3WorldDef.maximumLinearSpeed` default); beyond that, prefer ray/shape
+casts (`Box3DRayCast`/`Box3DSphereCast`) over simulated projectiles.
+
+## Determinism, recording, replay
+
+box3d steps are deterministic for a given binary across worker counts and
+schedulers. The subsystem wraps box3d's recorder: `StartRecording` snapshots the
+world and records every mutation with per-step state hashes; `ValidateLastRecording`
+(or `box3d.ValidateReplay <file>`) replays in a scratch world and compares hashes,
+which is the supported desync/regression check. Replaying at a different worker
+count than recorded re-partitions the constraint graph, turning the same check
+into a cross-thread determinism test (`Replay.CrossWorkerDeterminism`).
+
 ## Naming
 
 - C++ classes: `UBox3D…` / `FBox3D…` prefix, log category `LogBox3D`

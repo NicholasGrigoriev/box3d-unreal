@@ -169,13 +169,36 @@ proven to reach UE workers; world stats report measured step/solve times and exa
 counters; the debug-shape cache builds one wireframe per shape with exact point
 counts, reuses them on redraw, and frees them on shape destruction.
 
-## M6 — Polish & advanced
+## M6 — Polish & advanced ✅ 2026-07-06
 
-- [ ] Determinism validation (`b3Hash`-based), recording/replay tools (`b3Recording`)
-- [ ] Optional `BOX3D_DOUBLE_PRECISION` build switch for large worlds (ABI-affecting —
-      needs a Build.cs flag + matching define in both modules)
-- [ ] CCD/bullet configuration guidance, explosion helper (`b3World_Explode`)
-- [ ] Sample content, documentation pass, upstream version bump workflow (UPSTREAM.md)
+- [x] Recording/replay with built-in determinism validation: subsystem
+      `StartRecording`/`StopRecording`/`SaveRecordingToFile`/`ValidateLastRecording`
+      (box3d embeds per-step state hashes; validation replays in a scratch world
+      and compares them), console commands `box3d.RecordStart` /
+      `box3d.RecordStop [file]` (auto-validates + saves to `Saved/Box3D/`) /
+      `box3d.ValidateReplay <path>`
+- [x] `BOX3D_DOUBLE_PRECISION` build switch: single const in
+      `Box3DCore.Build.cs`, propagated to all dependents via PublicDefinitions
+      so the ABI always agrees; the conversion seam carries UE's LWC doubles
+      through `b3Pos` losslessly in that mode — the full 40-test suite was run
+      green under both ABIs (default remains single precision)
+- [x] Explosion helper: `UBox3DQueryLibrary::Box3DExplode` (radius + falloff,
+      impulse per facing area, mask filtering, immediate velocity change)
+- [x] CCD verified and documented: world continuous collision stops 150 m/s
+      bodies against thin statics out of the box; `bIsBullet` extends it to
+      dynamic-vs-dynamic (guidance in DESIGN.md)
+- [x] Documentation pass + `UPSTREAM.md` (vendored-version bump workflow with
+      the integration contracts to re-check)
+- [ ] *(deferred)* Sample content — the smoke commands (`box3d.Smoke`,
+      `box3d.SmokeActors`, `box3d.DebugDraw 1`) double as live samples; packaged
+      sample maps need a content project
+
+Verified by 4 automation tests (40 total green): a recorded session (seed
+snapshot + mid-recording spawns) replays with every embedded state hash
+matching, survives a file roundtrip, and — replayed at 4 workers from a serial
+recording — proves cross-thread determinism hash-exactly; explosions match
+dv = 3·I/(4·r·ρ) analytically with falloff, range, and mask filtering exact;
+continuous collision stops 150 m/s movers per the CCD matrix above.
 
 ---
 

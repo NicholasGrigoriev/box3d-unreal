@@ -8,23 +8,27 @@ UnrealBuildTool; the plugin is fully standalone with no external build steps.
 
 ## Status
 
-**Alpha / M5 complete.** The library compiles inside UE, a physics world is
-stepped per game world at a fixed timestep, `UBox3DBodyComponent` gives actors Box3D
-rigid bodies with transform sync in both directions — primitive shapes
-(box/sphere/capsule with auto-fit), cooked convex hulls, exact triangle meshes, and
-`CollisionAsset` (one shape per authored collision element), plus collision filtering
-and physical materials. `UBox3DQueryLibrary` exposes ray/shape casts, overlaps, and
-character-mover collide-and-slide helpers to Blueprint. Seven joint component types
+**Beta / M6 complete — feature roadmap done.** The library compiles inside UE, a
+physics world is stepped per game world at a fixed timestep, `UBox3DBodyComponent`
+gives actors Box3D rigid bodies with transform sync in both directions — primitive
+shapes (box/sphere/capsule with auto-fit), cooked convex hulls, exact triangle
+meshes, and `CollisionAsset` (one shape per authored collision element), plus
+collision filtering and physical materials. `UBox3DQueryLibrary` exposes ray/shape
+casts, overlaps, explosions, and character-mover collide-and-slide helpers to
+Blueprint. Seven joint component types
 (distance/revolute/prismatic/spherical/weld/motor/wheel) with limits, motors,
 springs, and breakage, plus contact/hit/sensor events as Blueprint delegates.
 Multithreaded stepping rides UE's task system (or box3d's internal scheduler) —
 5.1× on a 16-core 5k-body pile, deterministic across worker counts — with
 `stat box3d`, `box3d.DebugDraw` wireframes, and `box3d.Benchmark` for tuning.
-Landscape height fields are deferred. All of it is pinned by a deterministic
-automation suite — 36 tests (`Automation RunTests Box3DUnreal`, see
-[docs/TESTING.md](docs/TESTING.md)). Next up: M6 — polish (determinism validation,
-replay, CCD guidance). See [docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap
-and [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions.
+Recording/replay with hash-based determinism validation (`box3d.RecordStart/Stop`,
+`box3d.ValidateReplay`), continuous collision for fast movers, and an optional
+`BOX3D_DOUBLE_PRECISION` large-world build. Landscape height fields are deferred.
+All of it is pinned by a deterministic automation suite — 40 tests
+(`Automation RunTests Box3DUnreal`, see [docs/TESTING.md](docs/TESTING.md)).
+See [docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap,
+[docs/DESIGN.md](docs/DESIGN.md) for architecture decisions, and
+[UPSTREAM.md](UPSTREAM.md) for the box3d version-bump workflow.
 
 ## Install
 
@@ -33,9 +37,10 @@ Requires UE 5.7, C++ project.
 
 ## Tests
 
-36 automation tests cover conversion math, world stepping, body components, queries,
-mesh cooking, joints, gameplay events, threading, and diagnostics with analytic
-assertions ([docs/TESTING.md](docs/TESTING.md)):
+40 automation tests cover conversion math, world stepping, body components, queries,
+mesh cooking, joints, gameplay events, threading, diagnostics, replay determinism,
+explosions, and continuous collision with analytic assertions
+([docs/TESTING.md](docs/TESTING.md)):
 
 ```
 Automation RunTests Box3DUnreal
@@ -63,14 +68,15 @@ Either command with `0` clears its bodies.
 
 Also useful: `box3d.DebugDraw 1` (wireframes of every physics shape, plus
 `box3d.DebugDraw.Contacts/Bounds/Mass/...`), `stat box3d` (step profile and world
-counters), and `box3d.Benchmark` (scheduler comparison for sizing
-`WorkerCount`/`TaskSystem` in Project Settings).
+counters), `box3d.Benchmark` (scheduler comparison for sizing
+`WorkerCount`/`TaskSystem` in Project Settings), and `box3d.RecordStart` /
+`box3d.RecordStop` / `box3d.ValidateReplay <file>` (hash-validated record & replay).
 
 ## Modules
 
 | Module | Purpose |
 | --- | --- |
-| `Box3DCore` | Vendored box3d v0.1.0 (C17, unmodified upstream source) |
+| `Box3DCore` | Vendored box3d v0.1.0 (C17, unmodified upstream source — see [UPSTREAM.md](UPSTREAM.md)) |
 | `Box3DRuntime` | UE integration: world subsystem, unit conversion, settings, hooks |
 
 ## Conventions

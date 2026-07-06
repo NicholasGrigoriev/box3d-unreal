@@ -73,6 +73,10 @@ deterministic. No latent commands, no wall-clock waits.
 | M5 threading | UE-tasks and internal-scheduler runs match a serial run on a 180-body pile; tasks actually reach UE workers | `Threading.SchedulerEquivalence` |
 | M5 diagnostics | GetWorldStats (the `stat box3d` data): profile times measured, body/shape/contact/joint/island/awake counters, memory | `Diagnostics.WorldStats` |
 | M5 diagnostics | debug-shape cache: lazy one-entry-per-shape build, exact wireframe point counts per shape type, reuse on redraw, release on shape destroy | `Diagnostics.DebugDrawCache` |
+| M6 replay | record (seed + mid-recording spawns), hash-validated replay, file save/load roundtrip validates | `Replay.RecordAndValidate` |
+| M6 replay | serial recording replayed at 4 workers: every per-step state hash matches (cross-thread determinism) | `Replay.CrossWorkerDeterminism` |
+| M6 world | explosion: dv = 3·I/(4·r·ρ) exact at full scale, half at falloff midpoint, zero beyond, no spin, mask filtering | `World.ExplosionImpulse` |
+| M6 world | 150 m/s bodies: continuous collision stops non-bullet vs static thin plate; bullet flag stops dynamic-vs-dynamic, momentum transferred | `World.ContinuousFastBody` |
 
 ## Known gaps (deliberate)
 
@@ -80,8 +84,9 @@ deterministic. No latent commands, no wall-clock waits.
   motor-joint position springs** — properties are wired through to box3d but
   their steady states are awkward to pin analytically; covered indirectly by
   the def plumbing being shared with tested paths.
-- **`bIsBullet` / CCD behavior** — passthrough flag; meaningful assertions need
-  fast-mover scenarios, deferred to M6 CCD guidance work.
+- **`BOX3D_DOUBLE_PRECISION`** — the suite ran 40/40 green under the double ABI
+  at M6, but CI-style runs use the default single-precision build; re-run under
+  double when bumping upstream (see UPSTREAM.md).
 - **Damping decay curves** — passthrough to `b3BodyDef`; exact decay depends on
   solver internals, not asserted.
 - **TriangleMesh-on-dynamic fallback warning path** — emits a warning by design;
