@@ -1,12 +1,200 @@
-// Console hook for the M0 smoke test: `box3d.Smoke [Count]` in PIE drops
-// debug-drawn rigid bodies through the full create/step/read-back loop.
+// Console hooks for smoke tests:
+//   box3d.Smoke [Count]        (M0) debug-drawn raw bodies, no actors involved
+//   box3d.SmokeActors [Count]  (M1) real actors with UBox3DBodyComponent roots and
+//                              rendered meshes, proving the component sync pipeline
+//   box3d.AutoSmokeActors N    CVar: run SmokeActors N automatically when a game
+//                              world starts, then log settle state ~9s later.
+//                              Enables headless verification via
+//                              -ExecCmds="box3d.AutoSmokeActors 12".
 
+#include "Box3DBodyComponent.h"
 #include "Box3DRuntime.h"
 #include "Box3DWorldSubsystem.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
+#include "TimerManager.h"
 
 #if !UE_BUILD_SHIPPING
+
+namespace
+{
+	TArray<TWeakObjectPtr<AActor>> GSmokeActors;
+
+	AActor* SpawnBox3DMeshActor(UWorld* World, UStaticMesh* Mesh, const FTransform& Transform,
+		const FVector& MeshScale, EBox3DBodyType BodyType, EBox3DShapeType ShapeType)
+	{
+		AActor* Actor = World->SpawnActor<AActor>();
+		if (Actor == nullptr)
+		{
+			return nullptr;
+		}
+
+		UBox3DBodyComponent* Body = NewObject<UBox3DBodyComponent>(Actor, TEXT("Box3DBody"));
+		Body->BodyType = BodyType;
+		Body->ShapeType = ShapeType;
+		Actor->SetRootComponent(Body);
+		Body->SetWorldTransform(Transform);
+
+		UStaticMeshComponent* MeshComponent = NewObject<UStaticMeshComponent>(Actor, TEXT("Mesh"));
+		MeshComponent->SetupAttachment(Body);
+		MeshComponent->SetStaticMesh(Mesh);
+		MeshComponent->SetRelativeScale3D(MeshScale);
+		MeshComponent->SetMobility(EComponentMobility::Movable);
+		// Box3D owns collision here; keep Chaos entirely out of it.
+		MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+		// The mesh registers first so the body's BeginPlay (fired by its own
+		// RegisterComponent below) can auto-fit the shape from the mesh bounds.
+		MeshComponent->RegisterComponent();
+		Body->RegisterComponent();
+		return Actor;
+	}
+
+	void ClearSmokeActors()
+	{
+		int32 Destroyed = 0;
+		for (const TWeakObjectPtr<AActor>& Actor : GSmokeActors)
+		{
+			if (AActor* Live = Actor.Get())
+			{
+				Live->Destroy();
+				++Destroyed;
+			}
+		}
+		GSmokeActors.Empty();
+		UE_LOG(LogBox3D, Log, TEXT("box3d.SmokeActors: destroyed %d actors"), Destroyed);
+	}
+
+	void SpawnSmokeActors(UWorld* World, int32 Count)
+	{
+		Count = FMath::Min(Count, 1024);
+
+		UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+		UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+		if (CubeMesh == nullptr || SphereMesh == nullptr)
+		{
+			UE_LOG(LogBox3D, Error, TEXT("box3d.SmokeActors: engine basic shape meshes not found"));
+			return;
+		}
+
+		FVector ViewLocation = FVector::ZeroVector;
+		FRotator ViewRotation = FRotator::ZeroRotator;
+		if (const APlayerController* PC = World->GetFirstPlayerController())
+		{
+			PC->GetPlayerViewPoint(ViewLocation, ViewRotation);
+		}
+		const FVector Forward = FRotator(0.0, ViewRotation.Yaw, 0.0).Vector();
+		const FVector Center = ViewLocation + Forward * 600.0;
+
+		// Static ground slab: 20 m x 20 m x 0.5 m cube, top 3 m below the view.
+		const FVector GroundScale(20.0, 20.0, 0.5);
+		const FVector GroundCenter(Center.X, Center.Y, ViewLocation.Z - 300.0 - 25.0);
+		if (AActor* Ground = SpawnBox3DMeshActor(World, CubeMesh, FTransform(GroundCenter), GroundScale,
+			EBox3DBodyType::Static, EBox3DShapeType::Box))
+		{
+			GSmokeActors.Add(Ground);
+		}
+
+		// Dynamic bodies: 50 cm cubes and spheres in a jittered grid above the slab.
+		const int32 Columns = FMath::CeilToInt32(FMath::Sqrt(static_cast<float>(Count)));
+		const double Spacing = 70.0;
+		const double GridOffset = 0.5 * (Columns - 1) * Spacing;
+		const double GroundTopZ = GroundCenter.Z + 25.0;
+
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			const int32 Col = Index % Columns;
+			const int32 Row = (Index / Columns) % Columns;
+			const int32 Layer = Index / (Columns * Columns);
+
+			const FVector Position(
+				Center.X + (Col * Spacing - GridOffset) + FMath::FRandRange(-3.0f, 3.0f),
+				Center.Y + (Row * Spacing - GridOffset) + FMath::FRandRange(-3.0f, 3.0f),
+				GroundTopZ + 200.0 + Layer * 120.0);
+			const FQuat Rotation = FRotator(FMath::FRandRange(0.f, 30.f), FMath::FRandRange(0.f, 360.f), 0.f).Quaternion();
+
+			const bool bBox = (Index % 2 == 0);
+			if (AActor* Actor = SpawnBox3DMeshActor(World, bBox ? CubeMesh : SphereMesh,
+				FTransform(Rotation, Position), FVector(0.5),
+				EBox3DBodyType::Dynamic, bBox ? EBox3DShapeType::Box : EBox3DShapeType::Sphere))
+			{
+				GSmokeActors.Add(Actor);
+			}
+		}
+
+		UE_LOG(LogBox3D, Log, TEXT("box3d.SmokeActors: spawned %d body actors + ground (top Z=%.0f)"),
+			Count, GroundTopZ);
+	}
+
+	void LogSmokeActorState()
+	{
+		int32 Simulating = 0;
+		int32 Awake = 0;
+		int32 Logged = 0;
+		for (int32 Index = 1; Index < GSmokeActors.Num(); ++Index) // skip ground at [0]
+		{
+			const AActor* Actor = GSmokeActors[Index].Get();
+			const UBox3DBodyComponent* Body = Actor ? Actor->FindComponentByClass<UBox3DBodyComponent>() : nullptr;
+			if (Body == nullptr || !Body->IsSimulating())
+			{
+				continue;
+			}
+			++Simulating;
+			Awake += Body->IsAwake() ? 1 : 0;
+			if (Logged < 3)
+			{
+				UE_LOG(LogBox3D, Log, TEXT("box3d.SmokeActors: sample body %d at Z=%.1f (awake=%d, mass=%.1f kg)"),
+					Index, Actor->GetActorLocation().Z, Body->IsAwake() ? 1 : 0, Body->GetMass());
+				++Logged;
+			}
+		}
+		UE_LOG(LogBox3D, Log, TEXT("box3d.SmokeActors: settle check — %d simulating, %d awake"), Simulating, Awake);
+	}
+
+	TAutoConsoleVariable<int32> CVarAutoSmokeActors(
+		TEXT("box3d.AutoSmokeActors"), 0,
+		TEXT("If > 0, box3d.SmokeActors runs with this count when a game world starts (for headless testing)."));
+
+	FTimerHandle GAutoSmokeSpawnTimer;
+	FTimerHandle GAutoSmokeLogTimer;
+
+	// Static registration at module load; fires after a game world's actors initialize.
+	struct FAutoSmokeRegistrar
+	{
+		FAutoSmokeRegistrar()
+		{
+			FWorldDelegates::OnWorldInitializedActors.AddLambda([](const FActorsInitializedParams& Params)
+			{
+				UWorld* World = Params.World;
+				if (World == nullptr || !World->IsGameWorld())
+				{
+					return;
+				}
+
+				// The CVar is read inside the timer, not here: -ExecCmds from the
+				// command line executes after the initial map load, so at this point
+				// it may not be applied yet. The delay also lets the player
+				// controller spawn so placement in front of the view works.
+				World->GetTimerManager().SetTimer(GAutoSmokeSpawnTimer,
+					FTimerDelegate::CreateLambda([World]
+					{
+						const int32 Count = CVarAutoSmokeActors.GetValueOnGameThread();
+						if (Count <= 0)
+						{
+							return;
+						}
+						SpawnSmokeActors(World, Count);
+						World->GetTimerManager().SetTimer(GAutoSmokeLogTimer,
+							FTimerDelegate::CreateLambda([] { LogSmokeActorState(); }), 8.0f, false);
+					}), 1.0f, false);
+			});
+		}
+	};
+	FAutoSmokeRegistrar GAutoSmokeRegistrar;
+}
 
 static FAutoConsoleCommandWithWorldAndArgs GBox3DSmokeCommand(
 	TEXT("box3d.Smoke"),
@@ -40,6 +228,32 @@ static FAutoConsoleCommandWithWorldAndArgs GBox3DSmokeCommand(
 		else
 		{
 			Subsystem->SpawnSmokeBodies(FMath::Min(Count, 4096));
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GBox3DSmokeActorsCommand(
+	TEXT("box3d.SmokeActors"),
+	TEXT("Spawn actors whose root is a UBox3DBodyComponent with a rendered mesh. Usage: box3d.SmokeActors [Count=16]; 0 clears."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (World == nullptr)
+		{
+			return;
+		}
+
+		int32 Count = 16;
+		if (Args.Num() > 0)
+		{
+			Count = FCString::Atoi(*Args[0]);
+		}
+
+		if (Count <= 0)
+		{
+			ClearSmokeActors();
+		}
+		else
+		{
+			SpawnSmokeActors(World, Count);
 		}
 	}));
 

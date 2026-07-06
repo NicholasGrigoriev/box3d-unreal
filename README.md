@@ -8,10 +8,12 @@ UnrealBuildTool; the plugin is fully standalone with no external build steps.
 
 ## Status
 
-**Alpha / M0 complete.** The library compiles inside UE, a physics world is created
-per game world and stepped at a fixed timestep (verified headless). Next up: M1 —
-rigid bodies as components. See [docs/MILESTONES.md](docs/MILESTONES.md) for the
-roadmap and [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions.
+**Alpha / M1 complete.** The library compiles inside UE, a physics world is stepped
+per game world at a fixed timestep, and `UBox3DBodyComponent` gives actors Box3D
+rigid bodies (box/sphere/capsule, auto-fit shapes, Blueprint force/velocity API)
+with transform sync in both directions. Next up: M2 — queries and filtering. See
+[docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap and
+[docs/DESIGN.md](docs/DESIGN.md) for architecture decisions.
 
 ## Install
 
@@ -28,6 +30,15 @@ box3d.Smoke
 
 A stack of debug-drawn falling boxes and spheres simulated by Box3D appears in front
 of the camera. `box3d.Smoke 200` spawns 200 bodies.
+
+For the full component pipeline with rendered meshes (real actors whose root is a
+`UBox3DBodyComponent`):
+
+```
+box3d.SmokeActors
+```
+
+Either command with `0` clears its bodies.
 
 ## Modules
 

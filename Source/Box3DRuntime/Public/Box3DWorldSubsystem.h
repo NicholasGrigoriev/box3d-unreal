@@ -5,6 +5,8 @@
 #include "box3d/id.h"
 #include "Box3DWorldSubsystem.generated.h"
 
+class UBox3DBodyComponent;
+
 /// Owns one Box3D world per game/PIE UWorld and steps it at a fixed timestep.
 ///
 /// Stepping runs on the game thread from Tick using an accumulator clamped by
@@ -34,6 +36,12 @@ public:
 	/// Number of fixed steps performed since world creation.
 	uint64 GetStepCount() const { return StepCount; }
 
+	/// Kinematic bodies receive velocity-based transform targets before each fixed
+	/// step (b3Body_SetTargetTransform), so they collide smoothly instead of
+	/// teleporting. Body components register themselves on creation.
+	void RegisterKinematicBody(UBox3DBodyComponent* Component);
+	void UnregisterKinematicBody(UBox3DBodyComponent* Component);
+
 #if !UE_BUILD_SHIPPING
 	/// Smoke test (box3d.Smoke): drop debug-drawn bodies onto a static ground slab.
 	void SpawnSmokeBodies(int32 Count);
@@ -42,10 +50,14 @@ public:
 
 private:
 	void StepFixed(float FixedDeltaTime, int32 SubSteps);
+	void PushKinematicTargets(float FixedDeltaTime);
+	void SyncMovedBodies();
 
 	b3WorldId WorldId = {};
 	float Accumulator = 0.0f;
 	uint64 StepCount = 0;
+
+	TArray<TWeakObjectPtr<UBox3DBodyComponent>> KinematicBodies;
 
 #if !UE_BUILD_SHIPPING
 	void DrawSmokeBodies() const;

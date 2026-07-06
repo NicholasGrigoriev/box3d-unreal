@@ -24,20 +24,27 @@ Verified headless (`-game -nullrhi`): world created per game world, transient wo
 destroyed cleanly, `Box3D stepping: 60 fixed steps done` heartbeat in log. Visual
 `box3d.Smoke` check in PIE still worth an eyeball.
 
-## M1 — Rigid bodies as components
+## M1 — Rigid bodies as components ✅ 2026-07-06
 
 Goal: place Box3D-simulated actors in a level without writing C++.
 
-- [ ] `UBox3DBodyComponent` (scene component): body type, mass/damping/gravity scale,
-      motion locks, bullet flag; creates body on register, destroys on unregister
-- [ ] Shape setup from simple primitives: box, sphere, capsule (explicit extents + auto-fit
-      from owner's collision or bounds)
-- [ ] Transform sync: box3d → UE for dynamic bodies (post-step), UE → box3d for
-      kinematic/static (`b3Body_SetTargetTransform` for kinematics)
-- [ ] Velocity/force/impulse Blueprint API on the component
-- [ ] Sleep state, enable/disable, body events (`b3World_GetBodyEvents`) driving
+- [x] `UBox3DBodyComponent` (scene component): body type, damping, gravity scale,
+      motion locks, bullet flag; creates body on BeginPlay, destroys on EndPlay
+- [x] Shape setup from simple primitives: box, sphere, capsule (explicit extents + auto-fit
+      from the nearest attached primitive's bounds)
+- [x] Transform sync: box3d → UE for dynamic bodies (post-step), UE → box3d for
+      kinematic/static (`b3Body_SetTargetTransform` targets pushed before each fixed step)
+- [x] Velocity/force/impulse Blueprint API on the component
+- [x] Sleep state, enable/disable, body events (`b3World_GetBodyEvents`) driving
       component transform updates only for moved bodies
-- [ ] Per-body smoke map/level test in FPS_TEST
+- [x] Smoke test: `box3d.SmokeActors` spawns real actors (body component root + rendered
+      mesh); `box3d.AutoSmokeActors` CVar runs it headless
+
+Verified headless: 12 actors dropped 2 m, settled at exactly half-extent above the
+static slab (Z=97 on a slab top of 72 with 25 cm half extents), masses analytically
+correct (cube 125 kg, sphere 65.4 kg — auto-fit + density both right), all asleep
+after 8 s. Not covered yet: render interpolation between fixed steps (M5 territory),
+runtime shape/material changes.
 
 ## M2 — Queries, filtering, materials
 

@@ -1,5 +1,6 @@
 #include "Box3DWorldSubsystem.h"
 
+#include "Box3DBodyComponent.h"
 #include "Box3DConversion.h"
 #include "Box3DRuntime.h"
 #include "Box3DSettings.h"
@@ -66,10 +67,18 @@ void UBox3DWorldSubsystem::Tick(float DeltaTime)
 	// Fixed-step accumulator; drop time beyond the per-frame budget so a hitch
 	// cannot snowball into ever-longer frames.
 	Accumulator = FMath::Min(Accumulator + DeltaTime, Settings->MaxStepsPerTick * FixedDt);
+	bool bStepped = false;
 	while (Accumulator >= FixedDt)
 	{
+		PushKinematicTargets(FixedDt);
 		StepFixed(FixedDt, Settings->SubStepCount);
 		Accumulator -= FixedDt;
+		bStepped = true;
+	}
+
+	if (bStepped)
+	{
+		SyncMovedBodies();
 	}
 
 #if !UE_BUILD_SHIPPING
@@ -92,6 +101,50 @@ void UBox3DWorldSubsystem::StepFixed(float FixedDeltaTime, int32 SubSteps)
 	{
 		UE_LOG(LogBox3D, Log, TEXT("Box3D stepping: 60 fixed steps done, %d awake bodies"),
 			b3World_GetAwakeBodyCount(WorldId));
+	}
+}
+
+void UBox3DWorldSubsystem::RegisterKinematicBody(UBox3DBodyComponent* Component)
+{
+	KinematicBodies.AddUnique(Component);
+}
+
+void UBox3DWorldSubsystem::UnregisterKinematicBody(UBox3DBodyComponent* Component)
+{
+	KinematicBodies.Remove(Component);
+}
+
+void UBox3DWorldSubsystem::PushKinematicTargets(float FixedDeltaTime)
+{
+	for (int32 Index = KinematicBodies.Num() - 1; Index >= 0; --Index)
+	{
+		const UBox3DBodyComponent* Component = KinematicBodies[Index].Get();
+		if (Component == nullptr || !b3Body_IsValid(Component->GetBodyId()))
+		{
+			KinematicBodies.RemoveAtSwap(Index);
+			continue;
+		}
+
+		const b3WorldTransform Target{ Box3D::ToB3Pos(Component->GetComponentLocation()),
+									   Box3D::ToB3(Component->GetComponentQuat()) };
+		b3Body_SetTargetTransform(Component->GetBodyId(), Target, FixedDeltaTime, /*wake*/ true);
+	}
+}
+
+void UBox3DWorldSubsystem::SyncMovedBodies()
+{
+	// Move events cover the last step only; called once after the final step of the
+	// tick. userData is the owning component, kept valid because bodies are always
+	// destroyed in the component's EndPlay.
+	const b3BodyEvents Events = b3World_GetBodyEvents(WorldId);
+	for (int32 Index = 0; Index < Events.moveCount; ++Index)
+	{
+		const b3BodyMoveEvent& Move = Events.moveEvents[Index];
+		UBox3DBodyComponent* Component = static_cast<UBox3DBodyComponent*>(Move.userData);
+		if (Component != nullptr && IsValid(Component))
+		{
+			Component->SyncTransformFromPhysics(Box3D::ToUEPos(Move.transform.p), Box3D::ToUE(Move.transform.q));
+		}
 	}
 }
 
