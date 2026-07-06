@@ -104,15 +104,34 @@ smoke run.
       of the documented `-1` (box3d uses 0 for non-mesh shapes; now normalized via
       `b3Shape_GetType`)
 
-## M4 — Joints & events
+## M4 — Joints & events ✅ 2026-07-06
 
 Goal: constraints and gameplay-visible collision events.
 
-- [ ] Joint components: distance, revolute, prismatic, spherical, weld, motor, wheel
-- [ ] Limits, motors, springs exposed as UPROPERTYs
-- [ ] Contact begin/end + hit events → dynamic multicast delegates on body components
-- [ ] Sensor shapes → overlap-style events
-- [ ] Joint break events
+- [x] Joint components: distance, revolute, prismatic, spherical, weld, motor, wheel
+      (`UBox3DJointComponent` base: own transform = joint frame, ConnectedActor =
+      side A or implicit static world anchor; subsystem retries joints whose
+      bodies appear later)
+- [x] Limits, motors, springs exposed as UPROPERTYs (cm/degrees at the editor
+      face, newtons/N·m for forces — box3d native)
+- [x] Contact begin/end + hit events → dynamic multicast delegates on body
+      components (`bEnableContactEvents`/`bEnableHitEvents`; pump runs after
+      every fixed step so per-step event buffers are never dropped)
+- [x] Sensor shapes → overlap-style events (`bIsSensor` on the body; visitors
+      opt out via `bDetectableBySensors`)
+- [x] Joint break events (box3d reports force/torque threshold exceedance;
+      `bBreakable` joints destroy themselves and broadcast `OnJointBroke`)
+- [ ] *(deferred)* Parallel and filter joints (box3d extras outside the classic
+      seven; thin wrappers when a use case shows up)
+
+Verified by 10 automation tests (33 total suite green): rope hangs at exact
+length with constraint force = m·g and breaks past its threshold; revolute
+pins the radius and its motor reaches 90 deg/s on the hinge axis; prismatic
+stops on its lower limit with rotation locked; spherical holds the socket
+radius; weld keeps relative pose under impulse; motor joint reaches target
+velocity; wheel sags to the analytic spring equilibrium g/(2πf)² while the
+spin motor holds the axle axis; contact begin/end, hit approach speed √(2gh),
+and sensor pass-through all fire and resolve components.
 
 ## M5 — Threading & performance
 

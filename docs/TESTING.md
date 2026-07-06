@@ -60,9 +60,23 @@ deterministic. No latent commands, no wall-clock waits.
 | M3 cooking | trimesh cook, per-asset cache identity, winding (top-face normal), non-uniform scale, triangle index | `Cooking.TriangleMeshWindingAndCache` |
 | M3 cooking | hull cook + cache, hull mass vs analytic cylinder | `Cooking.ConvexHullCacheAndMass` |
 | M3 cooking | CollisionAsset box element (exact mass, shape count), sphere/convex elements (data-conditional), auto-fit from mesh bounds | `Cooking.CollisionAssetElements` |
+| M4 joints | distance: rigid rope length, constraint force = m·g, break threshold + OnJointBroke | `Joints.DistanceRopeAndBreak` |
+| M4 joints | revolute: radius pinned, hinge plane held, motor reaches speed on the hinge axis | `Joints.RevoluteHingeAndMotor` |
+| M4 joints | prismatic: axis-only slide, lower limit stop, GetTranslation, rotation locked | `Joints.PrismaticSlideAndLimits` |
+| M4 joints | spherical: socket radius held while swinging | `Joints.SphericalPendulum` |
+| M4 joints | weld: relative pose rigid under impulse | `Joints.WeldRigid` |
+| M4 joints | motor joint: drives to target relative velocity | `Joints.MotorJointVelocity` |
+| M4 joints | wheel: suspension sag = g/(2πf)², spin motor on the axle axis | `Joints.WheelSuspensionAndSpin` |
+| M4 events | contact begin on landing (other resolved), end on separation, silent without the flag | `Events.ContactBeginEnd` |
+| M4 events | hit event: free-fall approach speed, normal toward self | `Events.HitApproachSpeed` |
+| M4 events | sensor begin/end on pass-through, visitor resolved, no collision response | `Events.SensorOverlap` |
 
 ## Known gaps (deliberate)
 
+- **Spherical cone/twist limits, wheel steering, parallel/filter joints,
+  motor-joint position springs** — properties are wired through to box3d but
+  their steady states are awkward to pin analytically; covered indirectly by
+  the def plumbing being shared with tested paths.
 - **`bIsBullet` / CCD behavior** — passthrough flag; meaningful assertions need
   fast-mover scenarios, deferred to M6 CCD guidance work.
 - **Damping decay curves** — passthrough to `b3BodyDef`; exact decay depends on
