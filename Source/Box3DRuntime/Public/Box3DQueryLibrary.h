@@ -40,6 +40,16 @@ public:
 	static TArray<UBox3DBodyComponent*> Box3DOverlapSphere(UObject* WorldContextObject, FVector Center, float Radius,
 		const FBox3DQueryFilter& Filter);
 
+	/// Radial explosion: applies an outward impulse to every dynamic body within
+	/// Radius of Center, tapering to zero across Falloff beyond it. ImpulsePerArea
+	/// is impulse per unit of shape area facing the blast, in kg·cm/s per cm²;
+	/// negative values implode. Velocities change immediately (no step needed).
+	/// Only the filter's mask bits apply. Spheres, capsules, and hulls only;
+	/// per-shape opt-out via box3d's explosionScale (default 1).
+	UFUNCTION(BlueprintCallable, Category = "Box3D|World", meta = (WorldContext = "WorldContextObject", AutoCreateRefTerm = "Filter"))
+	static void Box3DExplode(UObject* WorldContextObject, FVector Center, float Radius, float Falloff,
+		float ImpulsePerArea, const FBox3DQueryFilter& Filter);
+
 	//~ Character mover helpers (box3d's kinematic mover toolkit) -----------------
 
 	/// Cast a vertical capsule mover (center at Position) along Translation.

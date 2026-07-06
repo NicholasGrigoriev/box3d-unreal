@@ -16,6 +16,17 @@ public class Box3DCore : ModuleRules
 		// Third-party code compiled at /W4 by UE; keep upstream warnings non-fatal.
 		bWarningsAsErrors = false;
 
+		// Large world mode: double-precision world positions (b3Pos/b3WorldTransform
+		// split translation, like Jolt's DMat44). ABI-affecting, which is why it is
+		// a PublicDefinition — UBT propagates it to every dependent module so both
+		// sides of the API always agree. Flip and rebuild; the Box3DRuntime
+		// conversion seam (Box3DConversion.h) keeps UE's LWC precision through it.
+		const bool bDoublePrecision = false;
+		if (bDoublePrecision)
+		{
+			PublicDefinitions.Add("BOX3D_DOUBLE_PRECISION=1");
+		}
+
 		PrivateDependencyModuleNames.Add("Core");
 
 		// In modular (editor) builds this module is its own DLL, so the C API must

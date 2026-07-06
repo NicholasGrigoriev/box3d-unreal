@@ -11,6 +11,8 @@
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
+#include "HAL/FileManager.h"
+#include "Misc/Paths.h"
 #include "box3d/box3d.h"
 #include "box3d/collision.h"
 
@@ -84,8 +86,14 @@ void UBox3DWorldSubsystem::Deinitialize()
 	}
 	WorldId = b3WorldId{};
 
-	// After the world: destroying it fires destroyDebugShape into the drawer, and
-	// task handles must not outlive their pool.
+	// After the world: destroying it fires destroyDebugShape into the drawer,
+	// detaches any active recording, and task handles must not outlive their pool.
+	if (Recording != nullptr)
+	{
+		b3DestroyRecording(Recording);
+		Recording = nullptr;
+	}
+	bRecordingActive = false;
 	DebugDrawer.Reset();
 	TaskPool.Reset();
 
@@ -374,6 +382,71 @@ void UBox3DWorldSubsystem::UpdateStats() const
 void UBox3DWorldSubsystem::DrawDebugWorld() const
 {
 	DebugDrawer->Draw(GetWorld(), WorldId);
+}
+
+bool UBox3DWorldSubsystem::StartRecording()
+{
+	if (!b3World_IsValid(WorldId))
+	{
+		return false;
+	}
+
+	if (bRecordingActive)
+	{
+		b3World_StopRecording(WorldId);
+	}
+	if (Recording == nullptr)
+	{
+		Recording = b3CreateRecording(0);
+	}
+
+	// box3d resets the buffer, snapshots the world as the replay seed, then
+	// records every mutation and step (with embedded state hashes) until stop.
+	b3World_StartRecording(WorldId, Recording);
+	bRecordingActive = true;
+	UE_LOG(LogBox3D, Log, TEXT("Box3D recording started for %s"), *GetNameSafe(GetWorld()));
+	return true;
+}
+
+bool UBox3DWorldSubsystem::StopRecording()
+{
+	if (!bRecordingActive || !b3World_IsValid(WorldId))
+	{
+		return false;
+	}
+
+	b3World_StopRecording(WorldId);
+	bRecordingActive = false;
+	UE_LOG(LogBox3D, Log, TEXT("Box3D recording stopped (%d bytes)"), b3Recording_GetSize(Recording));
+	return true;
+}
+
+bool UBox3DWorldSubsystem::SaveRecordingToFile(const FString& Path) const
+{
+	if (Recording == nullptr || bRecordingActive || b3Recording_GetSize(Recording) <= 0)
+	{
+		UE_LOG(LogBox3D, Warning, TEXT("SaveRecordingToFile: no stopped recording to save"));
+		return false;
+	}
+
+	// b3SaveRecordingToFile fopens the path directly; make sure the folder exists.
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), /*Tree*/ true);
+	const bool bSaved = b3SaveRecordingToFile(Recording, TCHAR_TO_UTF8(*Path));
+	UE_LOG(LogBox3D, Log, TEXT("Box3D recording %s to %s"), bSaved ? TEXT("saved") : TEXT("FAILED to save"), *Path);
+	return bSaved;
+}
+
+bool UBox3DWorldSubsystem::ValidateLastRecording() const
+{
+	if (Recording == nullptr || bRecordingActive || b3Recording_GetSize(Recording) <= 0)
+	{
+		UE_LOG(LogBox3D, Warning, TEXT("ValidateLastRecording: no stopped recording to validate"));
+		return false;
+	}
+
+	const bool bValid = b3ValidateReplay(b3Recording_GetData(Recording), b3Recording_GetSize(Recording), 1);
+	UE_LOG(LogBox3D, Log, TEXT("Box3D replay validation: %s"), bValid ? TEXT("deterministic") : TEXT("DIVERGED"));
+	return bValid;
 }
 
 #if !UE_BUILD_SHIPPING

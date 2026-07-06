@@ -246,3 +246,23 @@ FVector UBox3DQueryLibrary::Box3DSolveMoverDelta(UObject* WorldContextObject, FV
 	const b3PlaneSolverResult Result = b3SolvePlanes(Box3D::ToB3(DesiredDelta), Planes.GetData(), Planes.Num());
 	return Box3D::ToUE(Result.delta);
 }
+
+void UBox3DQueryLibrary::Box3DExplode(UObject* WorldContextObject, FVector Center, float Radius, float Falloff,
+	float ImpulsePerArea, const FBox3DQueryFilter& Filter)
+{
+	const b3WorldId WorldId = GetB3World(WorldContextObject);
+	if (!b3World_IsValid(WorldId))
+	{
+		return;
+	}
+
+	b3ExplosionDef Def = b3DefaultExplosionDef();
+	Def.maskBits = Box3D::ToB3Bits(Filter.MaskBits);
+	Def.position = Box3D::ToB3Pos(Center);
+	Def.radius = Radius * Box3D::UEToMeters;
+	Def.falloff = Falloff * Box3D::UEToMeters;
+	// Per-area quantities scale inversely twice: (kg·cm/s)/cm² -> (kg·m/s)/m²
+	// is x0.01 / x0.0001 = x100.
+	Def.impulsePerArea = ImpulsePerArea * Box3D::MetersToUE;
+	b3World_Explode(WorldId, &Def);
+}

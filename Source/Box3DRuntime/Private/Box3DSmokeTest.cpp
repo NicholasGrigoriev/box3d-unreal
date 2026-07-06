@@ -6,6 +6,8 @@
 //                              world starts, then log settle state ~9s later.
 //                              Enables headless verification via
 //                              -ExecCmds="box3d.AutoSmokeActors 12".
+//   box3d.RecordStart / box3d.RecordStop [file] / box3d.ValidateReplay <path>
+//                              (M6) record, hash-validate, and save world replays.
 
 #include "Box3DBodyComponent.h"
 #include "Box3DQueryLibrary.h"
@@ -16,7 +18,10 @@
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
+#include "Misc/DateTime.h"
+#include "Misc/Paths.h"
 #include "TimerManager.h"
+#include "box3d/box3d.h"
 
 #if !UE_BUILD_SHIPPING
 
@@ -312,6 +317,61 @@ static FAutoConsoleCommandWithWorldAndArgs GBox3DSmokeActorsCommand(
 		{
 			SpawnSmokeActors(World, Count);
 		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GBox3DRecordStartCommand(
+	TEXT("box3d.RecordStart"),
+	TEXT("Start recording the Box3D world (seed snapshot + every mutation, hash-stamped per step)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld* World)
+	{
+		UBox3DWorldSubsystem* Subsystem = World ? World->GetSubsystem<UBox3DWorldSubsystem>() : nullptr;
+		if (Subsystem != nullptr)
+		{
+			Subsystem->StartRecording();
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GBox3DRecordStopCommand(
+	TEXT("box3d.RecordStop"),
+	TEXT("Stop the Box3D recording, validate it, and save to Saved/Box3D/. Usage: box3d.RecordStop [FileName]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UBox3DWorldSubsystem* Subsystem = World ? World->GetSubsystem<UBox3DWorldSubsystem>() : nullptr;
+		if (Subsystem == nullptr || !Subsystem->StopRecording())
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("box3d.RecordStop: no recording in progress"));
+			return;
+		}
+
+		Subsystem->ValidateLastRecording();
+		const FString FileName = Args.Num() > 0
+			? Args[0]
+			: FString::Printf(TEXT("Recording_%s.b3r"), *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S")));
+		Subsystem->SaveRecordingToFile(FPaths::ProjectSavedDir() / TEXT("Box3D") / FileName);
+	}));
+
+static FAutoConsoleCommand GBox3DValidateReplayCommand(
+	TEXT("box3d.ValidateReplay"),
+	TEXT("Replay a saved recording and check its embedded state hashes. Usage: box3d.ValidateReplay <path>"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		if (Args.IsEmpty())
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("Usage: box3d.ValidateReplay <path-to-.b3r>"));
+			return;
+		}
+
+		b3Recording* Loaded = b3LoadRecordingFromFile(TCHAR_TO_UTF8(*Args[0]));
+		if (Loaded == nullptr)
+		{
+			UE_LOG(LogBox3D, Error, TEXT("box3d.ValidateReplay: could not load %s"), *Args[0]);
+			return;
+		}
+
+		const bool bValid = b3ValidateReplay(b3Recording_GetData(Loaded), b3Recording_GetSize(Loaded), 1);
+		UE_LOG(LogBox3D, Log, TEXT("box3d.ValidateReplay %s: %s (%d bytes)"),
+			*Args[0], bValid ? TEXT("deterministic") : TEXT("DIVERGED"), b3Recording_GetSize(Loaded));
+		b3DestroyRecording(Loaded);
 	}));
 
 #endif // !UE_BUILD_SHIPPING

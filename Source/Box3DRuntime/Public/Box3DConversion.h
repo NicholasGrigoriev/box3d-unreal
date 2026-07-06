@@ -15,10 +15,11 @@ namespace Box3D
 	constexpr float UEToMeters = 0.01f;
 	constexpr float MetersToUE = 100.0f;
 
-	/// Position/length: cm -> m
+	/// Position/length: cm -> m. Scaled in double and narrowed once, matching the
+	/// b3Pos seam bit-for-bit in single precision.
 	inline b3Vec3 ToB3(const FVector& V)
 	{
-		return b3Vec3{ float(V.X) * UEToMeters, float(V.Y) * UEToMeters, float(V.Z) * UEToMeters };
+		return b3Vec3{ float(V.X * double(UEToMeters)), float(V.Y * double(UEToMeters)), float(V.Z * double(UEToMeters)) };
 	}
 
 	/// Position/length: m -> cm
@@ -27,16 +28,21 @@ namespace Box3D
 		return FVector(V.x * MetersToUE, V.y * MetersToUE, V.z * MetersToUE);
 	}
 
-	/// World position: cm -> m. In single precision builds b3Pos aliases b3Vec3; this
-	/// seam is where double precision (large world mode) would slot in.
+	/// World position: cm -> m. The math runs in double and narrows to whatever
+	/// b3Pos holds, so BOX3D_DOUBLE_PRECISION (large world mode) keeps UE's full
+	/// LWC precision through this seam while single precision truncates as before.
 	inline b3Pos ToB3Pos(const FVector& V)
 	{
-		return b3Pos{ float(V.X) * UEToMeters, float(V.Y) * UEToMeters, float(V.Z) * UEToMeters };
+		b3Pos P;
+		P.x = decltype(P.x)(V.X * double(UEToMeters));
+		P.y = decltype(P.y)(V.Y * double(UEToMeters));
+		P.z = decltype(P.z)(V.Z * double(UEToMeters));
+		return P;
 	}
 
 	inline FVector ToUEPos(const b3Pos& P)
 	{
-		return FVector(P.x * MetersToUE, P.y * MetersToUE, P.z * MetersToUE);
+		return FVector(P.x * double(MetersToUE), P.y * double(MetersToUE), P.z * double(MetersToUE));
 	}
 
 	/// Unitless direction / angular velocity (rad/s): no scaling.

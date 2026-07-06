@@ -10,6 +10,7 @@ class UBox3DBodyComponent;
 class UBox3DJointComponent;
 class FBox3DUETaskPool;
 class FBox3DDebugDrawer;
+struct b3Recording;
 
 /// Snapshot of box3d's per-step profile and simulation counters, readable from
 /// Blueprint. Times describe the most recent fixed step, in milliseconds. The
@@ -104,6 +105,35 @@ public:
 	/// lazily on first draw, so it costs nothing until debug draw is used).
 	FBox3DDebugDrawer* GetDebugDrawer() const { return DebugDrawer.Get(); }
 
+	//~ Recording (box3d's determinism-validated record/replay) ------------------
+
+	/// Begin recording every world mutation (a seed snapshot plus all API calls
+	/// and steps, with embedded state hashes). Restarts the buffer if a recording
+	/// is already active. Console: box3d.RecordStart.
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Recording")
+	bool StartRecording();
+
+	/// Finish the active recording. The buffer stays available for saving or
+	/// validation until the next StartRecording or world teardown.
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Recording")
+	bool StopRecording();
+
+	UFUNCTION(BlueprintPure, Category = "Box3D|Recording")
+	bool IsRecording() const { return bRecordingActive; }
+
+	/// Write the last stopped recording to disk (directories are created).
+	/// Replay/inspect it with box3d.ValidateReplay <path>.
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Recording")
+	bool SaveRecordingToFile(const FString& Path) const;
+
+	/// Replay the last stopped recording in a scratch world and check every
+	/// embedded state hash — box3d's end-to-end determinism validation.
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Recording")
+	bool ValidateLastRecording() const;
+
+	/// Raw buffer access for tests/tools (null when nothing recorded).
+	const b3Recording* GetRecording() const { return Recording; }
+
 	/// Kinematic bodies receive velocity-based transform targets before each fixed
 	/// step (b3Body_SetTargetTransform), so they collide smoothly instead of
 	/// teleporting. Body components register themselves on creation.
@@ -150,6 +180,12 @@ private:
 	/// Owns cached debug wireframes; box3d calls back into it when shapes are
 	/// first drawn and when they are destroyed. Must outlive the b3 world.
 	TPimplPtr<FBox3DDebugDrawer> DebugDrawer;
+
+	/// Reusable recording buffer (box3d resets it on each StartRecording).
+	/// Destroyed after the world in Deinitialize; plain pointer because the C
+	/// struct is opaque and freed via b3DestroyRecording.
+	b3Recording* Recording = nullptr;
+	bool bRecordingActive = false;
 
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> KinematicBodies;
 	TArray<TWeakObjectPtr<UBox3DJointComponent>> PendingJoints;
