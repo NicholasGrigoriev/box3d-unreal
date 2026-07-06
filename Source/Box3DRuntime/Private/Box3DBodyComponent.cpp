@@ -5,6 +5,7 @@
 #include "Box3DWorldSubsystem.h"
 #include "Components/PrimitiveComponent.h"
 #include "Engine/World.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 #include "box3d/box3d.h"
 #include "box3d/collision.h"
 
@@ -93,8 +94,12 @@ void UBox3DBodyComponent::CreateShape(const FVector& WorldScale)
 
 	b3ShapeDef ShapeDef = b3DefaultShapeDef();
 	ShapeDef.density = Density;
-	ShapeDef.baseMaterial.friction = Friction;
-	ShapeDef.baseMaterial.restitution = Restitution;
+	ShapeDef.baseMaterial.friction = PhysicalMaterial ? PhysicalMaterial->Friction : Friction;
+	ShapeDef.baseMaterial.restitution = PhysicalMaterial ? PhysicalMaterial->Restitution : Restitution;
+	ShapeDef.baseMaterial.userMaterialId = static_cast<uint64>(UserMaterialId);
+	ShapeDef.filter.categoryBits = Box3D::ToB3Bits(Filter.CategoryBits);
+	ShapeDef.filter.maskBits = Box3D::ToB3Bits(Filter.MaskBits);
+	ShapeDef.filter.groupIndex = Filter.GroupIndex;
 
 	switch (ShapeType)
 	{

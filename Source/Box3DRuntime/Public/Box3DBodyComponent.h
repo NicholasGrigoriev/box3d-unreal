@@ -2,8 +2,11 @@
 
 #include "CoreMinimal.h"
 #include "Components/SceneComponent.h"
+#include "Box3DTypes.h"
 #include "box3d/id.h"
 #include "Box3DBodyComponent.generated.h"
+
+class UPhysicalMaterial;
 
 /// Simulation type, mirrors b3BodyType (values must stay in enum order).
 UENUM(BlueprintType)
@@ -135,6 +138,20 @@ public:
 	/// Restitution (bounciness), typically [0, 1].
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Material", meta = (ClampMin = "0"))
 	float Restitution = 0.0f;
+
+	/// Optional UE physical material; when set, its friction/restitution override the
+	/// values above at body creation.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Material")
+	TObjectPtr<UPhysicalMaterial> PhysicalMaterial = nullptr;
+
+	/// Opaque per-shape material id, returned by queries and passed to custom
+	/// friction/restitution mixers. Not interpreted by Box3D.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Material")
+	int64 UserMaterialId = 0;
+
+	/// Collision filter (categories, mask, group).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Collision")
+	FBox3DFilter Filter;
 
 	//~ Runtime API ---------------------------------------------------------------
 

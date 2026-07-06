@@ -17,6 +17,7 @@ public class Box3DRuntime : ModuleRules
 			"CoreUObject",
 			"Engine",
 			"DeveloperSettings",
+			"PhysicsCore",
 		});
 	}
 }
