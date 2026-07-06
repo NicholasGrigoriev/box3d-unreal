@@ -34,6 +34,10 @@ enum class EBox3DShapeType : uint8
 	/// Static bodies only (box3d mesh collision contacts static bodies only);
 	/// dynamic/kinematic bodies fall back to ConvexHull with a warning.
 	TriangleMesh,
+	/// One Box3D shape per element of the attached mesh's authored collision setup
+	/// (sphere, capsule, box, and convex elements). Falls back to TriangleMesh
+	/// (static) or ConvexHull (other types) when the mesh has no simple collision.
+	CollisionAsset,
 };
 
 /// Axes on which the body's motion is locked (world axes).

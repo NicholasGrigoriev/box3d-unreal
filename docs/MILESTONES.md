@@ -66,15 +66,28 @@ analytic, plane solver pushed an overlapping capsule up (+4.5 cm) instead of all
 a -50 cm move. Follow-up for a real FPS character: sweep-then-slide movement component
 built on these helpers (gameplay-side, or an M2.5 sample).
 
-## M3 — Complex collision
+## M3 — Complex collision ✅ (core) 2026-07-06
 
 Goal: real level geometry collides correctly.
 
-- [ ] Convex hull shapes cooked from Static Mesh collision (b3HullData from UBodySetup convex elems)
-- [ ] Triangle mesh shapes from Static Mesh render/complex collision data (`b3CreateMesh`)
-- [ ] Height field shapes from Landscape (`b3CreateHeightField`)
-- [ ] Compound shapes (`b3CreateCompoundShape`) for multi-primitive bodies
-- [ ] Asset lifetime strategy: cache cooked b3MeshData/b3HeightFieldData, share across bodies
+- [x] Convex hull shapes cooked from Static Mesh collision (convex elems, render-vertex
+      fallback simplified to 64 verts)
+- [x] Triangle mesh shapes from Static Mesh LOD0 render data (`b3CreateMesh`, welded,
+      edge-identified; triangle winding flipped at the cook boundary — UE winds CW)
+- [x] `CollisionAsset` shape type: one Box3D shape per authored collision element
+      (sphere/capsule/box/convex) — bodies support multiple shapes natively, and this
+      works on dynamic bodies where `b3CreateCompoundShape` (static-only) would not
+- [x] Asset lifetime strategy: cooked mesh/hull data cached per asset (`FObjectKey`),
+      owned by the module (mesh shapes hold references; cache flushed at shutdown)
+- [ ] *(deferred)* Height field shapes from Landscape (`b3CreateHeightField`) — no
+      landscape in the test project yet; needs the Landscape module dependency
+- [ ] *(deferred)* `b3CreateCompoundShape` for very large static multi-primitive
+      bodies — per-element shapes cover the common cases
+
+Verified headless, all four paths in one run: triangle-mesh ground (non-uniform scale
+20×20×0.5) ray-hit at exact cooked height, CollisionAsset cube (authored box element)
+at analytic mass/height, sphere primitive, and convex-hull cylinder (97.5 kg vs 98.2
+analytic for a 64-vert hull).
 
 ## M4 — Joints & events
 

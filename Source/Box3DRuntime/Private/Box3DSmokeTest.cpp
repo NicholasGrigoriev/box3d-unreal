@@ -120,8 +120,10 @@ namespace
 				GroundTopZ + 200.0 + Layer * 120.0);
 			const FQuat Rotation = FRotator(FMath::FRandRange(0.f, 30.f), FMath::FRandRange(0.f, 360.f), 0.f).Quaternion();
 
+			// Cubes go through CollisionAsset (authored box element), spheres through
+			// the explicit primitive, cylinders through cooked convex hulls.
 			UStaticMesh* Mesh = CubeMesh;
-			EBox3DShapeType Shape = EBox3DShapeType::Box;
+			EBox3DShapeType Shape = EBox3DShapeType::CollisionAsset;
 			if (Index % 3 == 1)
 			{
 				Mesh = SphereMesh;
