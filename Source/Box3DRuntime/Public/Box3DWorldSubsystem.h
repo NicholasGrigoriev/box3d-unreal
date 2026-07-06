@@ -6,6 +6,7 @@
 #include "Box3DWorldSubsystem.generated.h"
 
 class UBox3DBodyComponent;
+class UBox3DJointComponent;
 
 /// Owns one Box3D world per game/PIE UWorld and steps it at a fixed timestep.
 ///
@@ -42,6 +43,10 @@ public:
 	void RegisterKinematicBody(UBox3DBodyComponent* Component);
 	void UnregisterKinematicBody(UBox3DBodyComponent* Component);
 
+	/// Joints whose bodies were not created yet at their BeginPlay; retried
+	/// before each tick's stepping until creation succeeds or attempts run out.
+	void AddPendingJoint(UBox3DJointComponent* Joint);
+
 #if !UE_BUILD_SHIPPING
 	/// Smoke test (box3d.Smoke): drop debug-drawn bodies onto a static ground slab.
 	void SpawnSmokeBodies(int32 Count);
@@ -53,11 +58,19 @@ private:
 	void PushKinematicTargets(float FixedDeltaTime);
 	void SyncMovedBodies();
 
+	/// Retry joints whose bodies were missing at BeginPlay.
+	void CreatePendingJoints();
+
+	/// Dispatch contact/hit/sensor/joint-threshold events to components. Runs
+	/// after every fixed step because box3d buffers events per step only.
+	void PumpEvents();
+
 	b3WorldId WorldId = {};
 	float Accumulator = 0.0f;
 	uint64 StepCount = 0;
 
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> KinematicBodies;
+	TArray<TWeakObjectPtr<UBox3DJointComponent>> PendingJoints;
 
 #if !UE_BUILD_SHIPPING
 	void DrawSmokeBodies() const;

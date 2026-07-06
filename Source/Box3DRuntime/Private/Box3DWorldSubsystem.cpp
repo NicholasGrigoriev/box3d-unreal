@@ -2,8 +2,10 @@
 
 #include "Box3DBodyComponent.h"
 #include "Box3DConversion.h"
+#include "Box3DJointComponent.h"
 #include "Box3DRuntime.h"
 #include "Box3DSettings.h"
+#include "Box3DTypes.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
@@ -20,6 +22,7 @@ void UBox3DWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Def.gravity = Box3D::ToB3Accel(Settings->Gravity);
 	Def.enableSleep = Settings->bEnableSleep;
 	Def.enableContinuous = Settings->bEnableContinuous;
+	Def.hitEventThreshold = Settings->HitEventThreshold * Box3D::UEToMeters;
 	Def.workerCount = static_cast<uint32>(Settings->WorkerCount);
 
 	WorldId = b3CreateWorld(&Def);
@@ -64,6 +67,8 @@ void UBox3DWorldSubsystem::Tick(float DeltaTime)
 	const UBox3DSettings* Settings = GetDefault<UBox3DSettings>();
 	const float FixedDt = Settings->FixedTimeStep;
 
+	CreatePendingJoints();
+
 	// Fixed-step accumulator; drop time beyond the per-frame budget so a hitch
 	// cannot snowball into ever-longer frames.
 	Accumulator = FMath::Min(Accumulator + DeltaTime, Settings->MaxStepsPerTick * FixedDt);
@@ -72,6 +77,9 @@ void UBox3DWorldSubsystem::Tick(float DeltaTime)
 	{
 		PushKinematicTargets(FixedDt);
 		StepFixed(FixedDt, Settings->SubStepCount);
+		// Events are buffered for the last step only, so a begin/end pair split
+		// across two steps of the same tick would vanish if pumped once per tick.
+		PumpEvents();
 		Accumulator -= FixedDt;
 		bStepped = true;
 	}
@@ -128,6 +136,117 @@ void UBox3DWorldSubsystem::PushKinematicTargets(float FixedDeltaTime)
 		const b3WorldTransform Target{ Box3D::ToB3Pos(Component->GetComponentLocation()),
 									   Box3D::ToB3(Component->GetComponentQuat()) };
 		b3Body_SetTargetTransform(Component->GetBodyId(), Target, FixedDeltaTime, /*wake*/ true);
+	}
+}
+
+void UBox3DWorldSubsystem::AddPendingJoint(UBox3DJointComponent* Joint)
+{
+	PendingJoints.AddUnique(Joint);
+}
+
+void UBox3DWorldSubsystem::CreatePendingJoints()
+{
+	for (int32 Index = PendingJoints.Num() - 1; Index >= 0; --Index)
+	{
+		UBox3DJointComponent* Joint = PendingJoints[Index].Get();
+		if (Joint == nullptr || Joint->TryCreateJoint())
+		{
+			PendingJoints.RemoveAtSwap(Index);
+		}
+		else if (Joint->CreateAttempts > 8)
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("%s: giving up joint creation after %d attempts (bodies never appeared)"),
+				*Joint->GetPathName(), Joint->CreateAttempts);
+			PendingJoints.RemoveAtSwap(Index);
+		}
+	}
+}
+
+void UBox3DWorldSubsystem::PumpEvents()
+{
+	// Contact begin/end/hit. Shape ids in end events may reference destroyed
+	// shapes; ResolveComponent validates before touching them.
+	const b3ContactEvents Contacts = b3World_GetContactEvents(WorldId);
+	for (int32 Index = 0; Index < Contacts.beginCount; ++Index)
+	{
+		const b3ContactBeginTouchEvent& Event = Contacts.beginEvents[Index];
+		UBox3DBodyComponent* A = Box3D::ResolveComponent(Event.shapeIdA);
+		UBox3DBodyComponent* B = Box3D::ResolveComponent(Event.shapeIdB);
+		if (A != nullptr)
+		{
+			A->NotifyContactBegin(B);
+		}
+		if (B != nullptr)
+		{
+			B->NotifyContactBegin(A);
+		}
+	}
+	for (int32 Index = 0; Index < Contacts.endCount; ++Index)
+	{
+		const b3ContactEndTouchEvent& Event = Contacts.endEvents[Index];
+		UBox3DBodyComponent* A = Box3D::ResolveComponent(Event.shapeIdA);
+		UBox3DBodyComponent* B = Box3D::ResolveComponent(Event.shapeIdB);
+		if (A != nullptr)
+		{
+			A->NotifyContactEnd(B);
+		}
+		if (B != nullptr)
+		{
+			B->NotifyContactEnd(A);
+		}
+	}
+	for (int32 Index = 0; Index < Contacts.hitCount; ++Index)
+	{
+		const b3ContactHitEvent& Event = Contacts.hitEvents[Index];
+		UBox3DBodyComponent* A = Box3D::ResolveComponent(Event.shapeIdA);
+		UBox3DBodyComponent* B = Box3D::ResolveComponent(Event.shapeIdB);
+		const FVector Location = Box3D::ToUEPos(Event.point);
+		const FVector Normal = Box3D::ToUEDir(Event.normal); // points from A to B
+		const float ApproachSpeed = Event.approachSpeed * Box3D::MetersToUE;
+		if (A != nullptr)
+		{
+			A->NotifyHit(B, Location, -Normal, ApproachSpeed);
+		}
+		if (B != nullptr)
+		{
+			B->NotifyHit(A, Location, Normal, ApproachSpeed);
+		}
+	}
+
+	// Sensor overlaps, dispatched on the sensor body.
+	const b3SensorEvents Sensors = b3World_GetSensorEvents(WorldId);
+	for (int32 Index = 0; Index < Sensors.beginCount; ++Index)
+	{
+		const b3SensorBeginTouchEvent& Event = Sensors.beginEvents[Index];
+		if (UBox3DBodyComponent* Sensor = Box3D::ResolveComponent(Event.sensorShapeId))
+		{
+			Sensor->NotifySensorBegin(Box3D::ResolveComponent(Event.visitorShapeId));
+		}
+	}
+	for (int32 Index = 0; Index < Sensors.endCount; ++Index)
+	{
+		const b3SensorEndTouchEvent& Event = Sensors.endEvents[Index];
+		if (UBox3DBodyComponent* Sensor = Box3D::ResolveComponent(Event.sensorShapeId))
+		{
+			Sensor->NotifySensorEnd(Box3D::ResolveComponent(Event.visitorShapeId));
+		}
+	}
+
+	// Joints whose constraint force/torque exceeded their thresholds. Collect
+	// first: handling may destroy joints, invalidating the event array.
+	const b3JointEvents JointEvents = b3World_GetJointEvents(WorldId);
+	TArray<UBox3DJointComponent*, TInlineAllocator<16>> ThresholdJoints;
+	for (int32 Index = 0; Index < JointEvents.count; ++Index)
+	{
+		UBox3DJointComponent* Joint = static_cast<UBox3DJointComponent*>(JointEvents.jointEvents[Index].userData);
+		if (Joint != nullptr && IsValid(Joint))
+		{
+			ThresholdJoints.Add(Joint);
+		}
+	}
+	for (UBox3DJointComponent* Joint : ThresholdJoints)
+	{
+		Joint->HandleThresholdExceeded();
 	}
 }
 

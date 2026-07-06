@@ -177,6 +177,11 @@ void UBox3DBodyComponent::CreateShape(const FVector& WorldScale)
 	ShapeDef.filter.categoryBits = Box3D::ToB3Bits(Filter.CategoryBits);
 	ShapeDef.filter.maskBits = Box3D::ToB3Bits(Filter.MaskBits);
 	ShapeDef.filter.groupIndex = Filter.GroupIndex;
+	ShapeDef.isSensor = bIsSensor;
+	// Sensor shapes need the flag to emit events; non-sensors need it to be seen.
+	ShapeDef.enableSensorEvents = bIsSensor || bDetectableBySensors;
+	ShapeDef.enableContactEvents = bEnableContactEvents;
+	ShapeDef.enableHitEvents = bEnableHitEvents;
 
 	switch (ShapeType)
 	{
@@ -429,4 +434,30 @@ bool UBox3DBodyComponent::IsBodyEnabled() const
 float UBox3DBodyComponent::GetMass() const
 {
 	return b3Body_IsValid(BodyId) ? b3Body_GetMass(BodyId) : 0.0f;
+}
+
+void UBox3DBodyComponent::NotifyContactBegin(UBox3DBodyComponent* Other)
+{
+	OnContactBegin.Broadcast(Other, Other ? Other->GetOwner() : nullptr);
+}
+
+void UBox3DBodyComponent::NotifyContactEnd(UBox3DBodyComponent* Other)
+{
+	OnContactEnd.Broadcast(Other, Other ? Other->GetOwner() : nullptr);
+}
+
+void UBox3DBodyComponent::NotifyHit(UBox3DBodyComponent* Other, const FVector& Location, const FVector& Normal,
+	float ApproachSpeed)
+{
+	OnHit.Broadcast(Other, Location, Normal, ApproachSpeed);
+}
+
+void UBox3DBodyComponent::NotifySensorBegin(UBox3DBodyComponent* Visitor)
+{
+	OnSensorBegin.Broadcast(Visitor, Visitor ? Visitor->GetOwner() : nullptr);
+}
+
+void UBox3DBodyComponent::NotifySensorEnd(UBox3DBodyComponent* Visitor)
+{
+	OnSensorEnd.Broadcast(Visitor, Visitor ? Visitor->GetOwner() : nullptr);
 }

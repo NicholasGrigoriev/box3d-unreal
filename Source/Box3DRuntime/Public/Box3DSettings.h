@@ -42,6 +42,11 @@ public:
 	UPROPERTY(EditAnywhere, config, Category = "World")
 	bool bEnableContinuous = true;
 
+	/// Impacts faster than this (cm/s) fire OnHit on bodies that enable hit
+	/// events. Default 100 cm/s = box3d's 1 m/s.
+	UPROPERTY(EditAnywhere, config, Category = "World", meta = (ClampMin = "0"))
+	float HitEventThreshold = 100.0f;
+
 	/// Worker threads for the solver. 1 = single-threaded (current default; the
 	/// UE task-system hookup is a later milestone). Values above 1 use Box3D's
 	/// internal scheduler threads.

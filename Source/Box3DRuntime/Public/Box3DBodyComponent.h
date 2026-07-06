@@ -7,6 +7,14 @@
 #include "Box3DBodyComponent.generated.h"
 
 class UPhysicalMaterial;
+class UBox3DBodyComponent;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FBox3DContactSignature,
+	UBox3DBodyComponent*, OtherBody, AActor*, OtherActor);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FBox3DHitSignature,
+	UBox3DBodyComponent*, OtherBody, FVector, Location, FVector, Normal, float, ApproachSpeed);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FBox3DSensorSignature,
+	UBox3DBodyComponent*, VisitorBody, AActor*, VisitorActor);
 
 /// Simulation type, mirrors b3BodyType (values must stay in enum order).
 UENUM(BlueprintType)
@@ -163,6 +171,56 @@ public:
 	/// Collision filter (categories, mask, group).
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Collision")
 	FBox3DFilter Filter;
+
+	//~ Events --------------------------------------------------------------------
+
+	/// This body's shapes are sensors: they detect overlaps (OnSensorBegin/End)
+	/// but produce no collision response. Sensors still contribute to mass.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Events")
+	bool bIsSensor = false;
+
+	/// Fire OnContactBegin/OnContactEnd when this body's shapes touch others.
+	/// Off by default: contact events cost a little per touching pair.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Events")
+	bool bEnableContactEvents = false;
+
+	/// Fire OnHit for impacts faster than the project's hit speed threshold.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Events")
+	bool bEnableHitEvents = false;
+
+	/// Sensors can see this body. On by default for UE-like overlap behavior
+	/// (box3d itself defaults to invisible-to-sensors).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Events")
+	bool bDetectableBySensors = true;
+
+	/// Another body's shape started touching this body (needs bEnableContactEvents).
+	UPROPERTY(BlueprintAssignable, Category = "Box3D|Events")
+	FBox3DContactSignature OnContactBegin;
+
+	/// A touching shape separated from this body (needs bEnableContactEvents).
+	UPROPERTY(BlueprintAssignable, Category = "Box3D|Events")
+	FBox3DContactSignature OnContactEnd;
+
+	/// Impact above the hit speed threshold (needs bEnableHitEvents). Location
+	/// in cm, normal pointing from the other shape toward this body, approach
+	/// speed in cm/s.
+	UPROPERTY(BlueprintAssignable, Category = "Box3D|Events")
+	FBox3DHitSignature OnHit;
+
+	/// A body entered this sensor (needs bIsSensor).
+	UPROPERTY(BlueprintAssignable, Category = "Box3D|Events")
+	FBox3DSensorSignature OnSensorBegin;
+
+	/// A body left this sensor (needs bIsSensor).
+	UPROPERTY(BlueprintAssignable, Category = "Box3D|Events")
+	FBox3DSensorSignature OnSensorEnd;
+
+	/// Event dispatch from the world subsystem's per-step pump.
+	void NotifyContactBegin(UBox3DBodyComponent* Other);
+	void NotifyContactEnd(UBox3DBodyComponent* Other);
+	void NotifyHit(UBox3DBodyComponent* Other, const FVector& Location, const FVector& Normal, float ApproachSpeed);
+	void NotifySensorBegin(UBox3DBodyComponent* Visitor);
+	void NotifySensorEnd(UBox3DBodyComponent* Visitor);
 
 	//~ Runtime API ---------------------------------------------------------------
 
