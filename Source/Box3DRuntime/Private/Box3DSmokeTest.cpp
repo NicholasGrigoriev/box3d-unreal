@@ -8,6 +8,7 @@
 //                              -ExecCmds="box3d.AutoSmokeActors 12".
 
 #include "Box3DBodyComponent.h"
+#include "Box3DQueryLibrary.h"
 #include "Box3DRuntime.h"
 #include "Box3DWorldSubsystem.h"
 #include "Components/StaticMeshComponent.h"
@@ -129,11 +130,12 @@ namespace
 			Count, GroundTopZ);
 	}
 
-	void LogSmokeActorState()
+	void LogSmokeActorState(UWorld* World)
 	{
 		int32 Simulating = 0;
 		int32 Awake = 0;
 		int32 Logged = 0;
+		const AActor* SampleActor = nullptr;
 		for (int32 Index = 1; Index < GSmokeActors.Num(); ++Index) // skip ground at [0]
 		{
 			const AActor* Actor = GSmokeActors[Index].Get();
@@ -150,8 +152,40 @@ namespace
 					Index, Actor->GetActorLocation().Z, Body->IsAwake() ? 1 : 0, Body->GetMass());
 				++Logged;
 			}
+			if (SampleActor == nullptr)
+			{
+				SampleActor = Actor;
+			}
 		}
 		UE_LOG(LogBox3D, Log, TEXT("box3d.SmokeActors: settle check — %d simulating, %d awake"), Simulating, Awake);
+
+		if (World == nullptr || SampleActor == nullptr)
+		{
+			return;
+		}
+
+		// Query self-test against the settled scene (M2).
+		const FVector SampleLocation = SampleActor->GetActorLocation();
+		const FBox3DQueryFilter Filter;
+
+		FBox3DHitResult Hit;
+		const bool bRayHit = UBox3DQueryLibrary::Box3DRayCast(World,
+			SampleLocation + FVector(0, 0, 300), SampleLocation - FVector(0, 0, 300), Filter, Hit);
+		UE_LOG(LogBox3D, Log, TEXT("box3d.SmokeActors: query check — ray %s at Z=%.1f on %s"),
+			bRayHit ? TEXT("hit") : TEXT("MISSED"), Hit.Location.Z, *GetNameSafe(Hit.Actor));
+
+		const TArray<UBox3DBodyComponent*> Overlaps = UBox3DQueryLibrary::Box3DOverlapSphere(World,
+			SampleLocation, 200.0f, Filter);
+		UE_LOG(LogBox3D, Log, TEXT("box3d.SmokeActors: query check — overlap sphere r=200 found %d bodies"),
+			Overlaps.Num());
+
+		const float MoverFraction = UBox3DQueryLibrary::Box3DCastMover(World,
+			SampleLocation + FVector(0, 0, 400), FVector(0, 0, -600), 30.0f, 90.0f, Filter);
+		int32 PlaneCount = 0;
+		const FVector SolvedDelta = UBox3DQueryLibrary::Box3DSolveMoverDelta(World,
+			SampleLocation + FVector(0, 0, 60), 30.0f, 90.0f, FVector(0, 0, -50), Filter, PlaneCount);
+		UE_LOG(LogBox3D, Log, TEXT("box3d.SmokeActors: query check — mover cast fraction=%.2f, solve planes=%d delta=(%.1f %.1f %.1f)"),
+			MoverFraction, PlaneCount, SolvedDelta.X, SolvedDelta.Y, SolvedDelta.Z);
 	}
 
 	TAutoConsoleVariable<int32> CVarAutoSmokeActors(
@@ -188,7 +222,7 @@ namespace
 						}
 						SpawnSmokeActors(World, Count);
 						World->GetTimerManager().SetTimer(GAutoSmokeLogTimer,
-							FTimerDelegate::CreateLambda([] { LogSmokeActorState(); }), 8.0f, false);
+							FTimerDelegate::CreateLambda([World] { LogSmokeActorState(World); }), 8.0f, false);
 					}), 1.0f, false);
 			});
 		}

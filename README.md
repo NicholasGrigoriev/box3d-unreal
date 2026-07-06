@@ -8,11 +8,13 @@ UnrealBuildTool; the plugin is fully standalone with no external build steps.
 
 ## Status
 
-**Alpha / M1 complete.** The library compiles inside UE, a physics world is stepped
-per game world at a fixed timestep, and `UBox3DBodyComponent` gives actors Box3D
-rigid bodies (box/sphere/capsule, auto-fit shapes, Blueprint force/velocity API)
-with transform sync in both directions. Next up: M2 — queries and filtering. See
-[docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap and
+**Alpha / M2 complete.** The library compiles inside UE, a physics world is stepped
+per game world at a fixed timestep, `UBox3DBodyComponent` gives actors Box3D rigid
+bodies (box/sphere/capsule, auto-fit shapes, Blueprint force/velocity API, collision
+filtering, physical materials) with transform sync in both directions, and
+`UBox3DQueryLibrary` exposes ray/shape casts, overlaps, and character-mover
+collide-and-slide helpers to Blueprint. Next up: M3 — mesh and landscape collision.
+See [docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap and
 [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions.
 
 ## Install

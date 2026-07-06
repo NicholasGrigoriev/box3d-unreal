@@ -7,6 +7,7 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "box3d/box3d.h"
+#include "box3d/collision.h"
 
 namespace
 {
@@ -178,4 +179,65 @@ TArray<UBox3DBodyComponent*> UBox3DQueryLibrary::Box3DOverlapSphere(UObject* Wor
 		&Components);
 
 	return Components;
+}
+
+namespace
+{
+	b3Capsule MakeMoverCapsule(float RadiusCm, float HalfHeightCm)
+	{
+		const float RadiusM = RadiusCm * Box3D::UEToMeters;
+		const float SegmentHalfM = FMath::Max(HalfHeightCm - RadiusCm, 0.0f) * Box3D::UEToMeters;
+		return b3Capsule{ { 0.0f, 0.0f, -SegmentHalfM }, { 0.0f, 0.0f, SegmentHalfM }, RadiusM };
+	}
+}
+
+float UBox3DQueryLibrary::Box3DCastMover(UObject* WorldContextObject, FVector Position, FVector Translation,
+	float Radius, float HalfHeight, const FBox3DQueryFilter& Filter)
+{
+	const b3WorldId WorldId = GetB3World(WorldContextObject);
+	if (!b3World_IsValid(WorldId))
+	{
+		return 1.0f;
+	}
+
+	const b3Capsule Mover = MakeMoverCapsule(Radius, HalfHeight);
+	return b3World_CastMover(WorldId, Box3D::ToB3Pos(Position), &Mover, Box3D::ToB3(Translation),
+		MakeB3QueryFilter(Filter), nullptr, nullptr);
+}
+
+FVector UBox3DQueryLibrary::Box3DSolveMoverDelta(UObject* WorldContextObject, FVector Position, float Radius,
+	float HalfHeight, FVector DesiredDelta, const FBox3DQueryFilter& Filter, int32& OutPlaneCount)
+{
+	OutPlaneCount = 0;
+
+	const b3WorldId WorldId = GetB3World(WorldContextObject);
+	if (!b3World_IsValid(WorldId))
+	{
+		return DesiredDelta;
+	}
+
+	// Gather contact planes around the capsule, then let box3d's plane solver
+	// produce a delta that slides along them.
+	TArray<b3CollisionPlane, TInlineAllocator<32>> Planes;
+	const b3Capsule Mover = MakeMoverCapsule(Radius, HalfHeight);
+	b3World_CollideMover(WorldId, Box3D::ToB3Pos(Position), &Mover, MakeB3QueryFilter(Filter),
+		[](b3ShapeId /*ShapeId*/, const b3PlaneResult* PlaneResults, int PlaneCount, void* Context) -> bool
+		{
+			auto* Out = static_cast<TArray<b3CollisionPlane, TInlineAllocator<32>>*>(Context);
+			for (int Index = 0; Index < PlaneCount && Out->Num() < 32; ++Index)
+			{
+				Out->Add(b3CollisionPlane{ PlaneResults[Index].plane, FLT_MAX, 0.0f, true });
+			}
+			return Out->Num() < 32;
+		},
+		&Planes);
+
+	OutPlaneCount = Planes.Num();
+	if (Planes.IsEmpty())
+	{
+		return DesiredDelta;
+	}
+
+	const b3PlaneSolverResult Result = b3SolvePlanes(Box3D::ToB3(DesiredDelta), Planes.GetData(), Planes.Num());
+	return Box3D::ToUE(Result.delta);
 }

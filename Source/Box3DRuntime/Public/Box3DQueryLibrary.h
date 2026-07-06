@@ -39,4 +39,21 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Box3D|Query", meta = (WorldContext = "WorldContextObject", AutoCreateRefTerm = "Filter"))
 	static TArray<UBox3DBodyComponent*> Box3DOverlapSphere(UObject* WorldContextObject, FVector Center, float Radius,
 		const FBox3DQueryFilter& Filter);
+
+	//~ Character mover helpers (box3d's kinematic mover toolkit) -----------------
+
+	/// Cast a vertical capsule mover (center at Position) along Translation.
+	/// Returns the safe fraction [0, 1] of the translation; slides along surfaces
+	/// rather than reporting them — pair with Box3DSolveMoverDelta for contacts.
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Mover", meta = (WorldContext = "WorldContextObject", AutoCreateRefTerm = "Filter"))
+	static float Box3DCastMover(UObject* WorldContextObject, FVector Position, FVector Translation, float Radius,
+		float HalfHeight, const FBox3DQueryFilter& Filter);
+
+	/// Collide-and-slide: gather contact planes around a capsule mover at Position
+	/// and solve DesiredDelta against them (box3d's b3SolvePlanes). Returns the
+	/// adjusted delta; OutPlaneCount reports how many contact planes were found.
+	/// This is the core of kinematic character movement against the Box3D world.
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Mover", meta = (WorldContext = "WorldContextObject", AutoCreateRefTerm = "Filter"))
+	static FVector Box3DSolveMoverDelta(UObject* WorldContextObject, FVector Position, float Radius, float HalfHeight,
+		FVector DesiredDelta, const FBox3DQueryFilter& Filter, int32& OutPlaneCount);
 };

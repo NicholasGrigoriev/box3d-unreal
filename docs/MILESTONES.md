@@ -46,15 +46,25 @@ correct (cube 125 kg, sphere 65.4 kg — auto-fit + density both right), all asl
 after 8 s. Not covered yet: render interpolation between fixed steps (M5 territory),
 runtime shape/material changes.
 
-## M2 — Queries, filtering, materials
+## M2 — Queries, filtering, materials ✅ 2026-07-06
 
 Goal: gameplay code can ask questions of the physics world.
 
-- [ ] Blueprint function library: raycast (closest + multi), shape cast, overlap tests
-- [ ] `b3QueryFilter` / `b3Filter` exposure — collision channels mapped to category/mask bits
-- [ ] Physical material mapping (friction, restitution, user material IDs)
-- [ ] Character mover experiments: `b3World_CastMover` / `b3World_CollideMover` for the
-      FPS character (this is the fun one for an FPS project)
+- [x] Blueprint function library: raycast (closest + multi), sphere/capsule casts,
+      sphere overlap tests
+- [x] `b3QueryFilter` / `b3Filter` exposure — `EBox3DChannel` bit indices with editor
+      bitmask UI, widened to box3d's 64-bit masks
+- [x] Physical material mapping (`UPhysicalMaterial` override, user material IDs
+      surfaced in hit results)
+- [x] Character mover helpers: `Box3DCastMover` (safe translation fraction) and
+      `Box3DSolveMoverDelta` (`b3World_CollideMover` planes → `b3SolvePlanes`
+      collide-and-slide) exposed to Blueprint
+
+Verified headless against the settled smoke scene: ray hit a settled body's top face
+at exactly Z=122 (center 97 + 25 half-extent), mover cast fraction 0.48 vs 0.475
+analytic, plane solver pushed an overlapping capsule up (+4.5 cm) instead of allowing
+a -50 cm move. Follow-up for a real FPS character: sweep-then-slide movement component
+built on these helpers (gameplay-side, or an M2.5 sample).
 
 ## M3 — Complex collision
 
