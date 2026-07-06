@@ -89,6 +89,21 @@ Verified headless, all four paths in one run: triangle-mesh ground (non-uniform 
 at analytic mass/height, sphere primitive, and convex-hull cylinder (97.5 kg vs 98.2
 analytic for a 64-vert hull).
 
+## M3.5 — Test coverage pass ✅ 2026-07-06
+
+Goal: every M0–M3 behavior pinned by a deterministic automation test, not just the
+smoke run.
+
+- [x] Automation test suite (`Automation RunTests Box3DUnreal`): 23 tests across
+      conversion math, world stepping, bodies, queries, and cooking — synthetic game
+      worlds stepped manually, analytic expected values throughout
+      (see [TESTING.md](TESTING.md) for the coverage matrix)
+- [x] Bug found & fixed: `bWantsOnUpdateTransform` was never set, so component moves
+      (static follows, dynamic/kinematic teleports) never reached the physics body
+- [x] Bug found & fixed: hull/sphere/capsule hits reported `TriangleIndex 0` instead
+      of the documented `-1` (box3d uses 0 for non-mesh shapes; now normalized via
+      `b3Shape_GetType`)
+
 ## M4 — Joints & events
 
 Goal: constraints and gameplay-visible collision events.

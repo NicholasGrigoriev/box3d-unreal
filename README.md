@@ -15,7 +15,9 @@ rigid bodies with transform sync in both directions — primitive shapes
 `CollisionAsset` (one shape per authored collision element), plus collision filtering
 and physical materials. `UBox3DQueryLibrary` exposes ray/shape casts, overlaps, and
 character-mover collide-and-slide helpers to Blueprint. Landscape height fields are
-deferred. Next up: M4 — joints and contact events. See
+deferred. All of it is pinned by a deterministic automation suite
+(`Automation RunTests Box3DUnreal` — see [docs/TESTING.md](docs/TESTING.md)).
+Next up: M4 — joints and contact events. See
 [docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap and
 [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions.
 
@@ -23,6 +25,15 @@ deferred. Next up: M4 — joints and contact events. See
 
 Drop the `Box3DUnreal` folder into your project's `Plugins/` directory and rebuild.
 Requires UE 5.7, C++ project.
+
+## Tests
+
+23 automation tests cover conversion math, world stepping, body components, queries,
+and mesh cooking with analytic assertions ([docs/TESTING.md](docs/TESTING.md)):
+
+```
+Automation RunTests Box3DUnreal
+```
 
 ## Quick test
 
