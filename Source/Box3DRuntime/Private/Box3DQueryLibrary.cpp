@@ -35,7 +35,12 @@ namespace
 		Hit.Normal = Box3D::ToUEDir(Normal);
 		Hit.Fraction = Fraction;
 		Hit.UserMaterialId = static_cast<int64>(UserMaterialId);
-		Hit.TriangleIndex = TriangleIndex;
+		// box3d reports 0 rather than -1 for shapes that have no triangles; keep
+		// the documented "-1 unless mesh-derived" contract of FBox3DHitResult.
+		const b3ShapeType ShapeType = b3Shape_GetType(ShapeId);
+		const bool bHasTriangles =
+			ShapeType == b3_meshShape || ShapeType == b3_heightShape || ShapeType == b3_compoundShape;
+		Hit.TriangleIndex = bHasTriangles ? TriangleIndex : INDEX_NONE;
 		Hit.Component = Box3D::ResolveComponent(ShapeId);
 		Hit.Actor = Hit.Component ? Hit.Component->GetOwner() : nullptr;
 		return Hit;

@@ -93,6 +93,9 @@ namespace
 UBox3DBodyComponent::UBox3DBodyComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
+	// Without this, USceneComponent never calls OnUpdateTransform and component
+	// moves silently stop reaching the physics body.
+	bWantsOnUpdateTransform = true;
 }
 
 void UBox3DBodyComponent::BeginPlay()
