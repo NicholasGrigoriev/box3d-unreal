@@ -133,16 +133,41 @@ velocity; wheel sags to the analytic spring equilibrium g/(2πf)² while the
 spin motor holds the axle axis; contact begin/end, hit approach speed √(2gh),
 and sensor pass-through all fire and resolve components.
 
-## M5 — Threading & performance
+## M5 — Threading & performance ✅ 2026-07-06
 
 Goal: production-grade throughput.
 
-- [ ] Hook `enqueueTask`/`finishTask` into UE task system (respecting the fork/join
-      blocking contract — dedicated step thread or careful game-thread stepping)
-- [ ] Alternative: benchmark box3d's internal scheduler vs UE tasks, pick default
-- [ ] `stat box3d` — counters/profile from `b3World_GetProfile` / `b3World_GetCounters`
-- [ ] Debug draw via `b3World_Draw` + debug shape callbacks (persistent shape cache)
-- [ ] Benchmark map: 5k+ bodies, compare against Chaos equivalent for fun
+- [x] `enqueueTask`/`finishTask` hooked into UE tasks (`FBox3DUETaskPool`: fixed
+      256-slot handle array per box3d's stable-pointer recommendation, atomic slot
+      counter because the solve orchestrator enqueues from worker threads,
+      `FTask::Wait` for the join — the fork/join contract is safe because the step
+      blocks on the game thread, which doubles as box3d's worker 0, and UE workers
+      retract-or-help instead of deadlocking)
+- [x] Scheduler choice: `UBox3DSettings::TaskSystem` (UnrealTasks default — shares
+      engine workers, no extra threads | Box3DInternal — dedicated threads) with
+      `WorkerCount` (default 1 = fully serial)
+- [x] `stat box3d` — per-step profile times + body/shape/contact/joint/island/
+      task/memory counters; `GetWorldStats()` exposes the same data to
+      Blueprint and tests without the stats system
+- [x] Debug draw via `b3World_Draw`: persistent wireframe cache behind the
+      createDebugShape/destroyDebugShape world callbacks (registered on every
+      world, lazily populated so it costs nothing until used), DrawDebugHelpers
+      output, `box3d.DebugDraw` master CVar + Joints/Bounds/Contacts/Mass/
+      Islands/Distance sub-CVars
+- [x] `box3d.Benchmark [bodies] [steps] [workers]` — identical 5k-body pile through
+      serial / internal / UE-tasks configs in standalone physics worlds
+- [ ] *(deferred)* Chaos comparison — needs editor content in a host project;
+      the plugin-side command measures box3d only
+- [ ] *(deferred)* Render interpolation between fixed steps (carried from M1 notes)
+
+Measured (5000 bodies, 180 steps, ~57.6k contacts, Win64, 16 physical cores):
+serial 25.9 ms avg/step; box3d internal ×16 4.45 ms (5.8×); UE tasks ×16 5.12 ms
+(5.1×, 8.8k tasks enqueued) — with identical final contact counts across all three
+schedulers. Verified by 3 automation tests (36 total green): a 180-body pile lands
+within 1 mm of the serial result under UE-tasks ×4 and internal ×4 with tasks
+proven to reach UE workers; world stats report measured step/solve times and exact
+counters; the debug-shape cache builds one wireframe per shape with exact point
+counts, reuses them on redraw, and frees them on shape destruction.
 
 ## M6 — Polish & advanced
 

@@ -23,6 +23,31 @@
 
 namespace Box3DTest
 {
+	/// Temporarily override scheduler settings on the UBox3DSettings CDO. The
+	/// subsystem reads settings once in Initialize, so construct this BEFORE the
+	/// FTestWorld whose physics world should use the override.
+	struct FScopedTaskSettings
+	{
+		int32 SavedWorkers;
+		EBox3DTaskSystem SavedSystem;
+
+		FScopedTaskSettings(int32 Workers, EBox3DTaskSystem System)
+		{
+			UBox3DSettings* Settings = GetMutableDefault<UBox3DSettings>();
+			SavedWorkers = Settings->WorkerCount;
+			SavedSystem = Settings->TaskSystem;
+			Settings->WorkerCount = Workers;
+			Settings->TaskSystem = System;
+		}
+
+		~FScopedTaskSettings()
+		{
+			UBox3DSettings* Settings = GetMutableDefault<UBox3DSettings>();
+			Settings->WorkerCount = SavedWorkers;
+			Settings->TaskSystem = SavedSystem;
+		}
+	};
+
 	/// A minimal begun-play game world with a live Box3D subsystem, torn down on
 	/// scope exit (which also exercises world destruction each test). Stepping is
 	/// driven manually through the subsystem so tests are frame-exact.

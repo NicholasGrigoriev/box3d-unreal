@@ -78,11 +78,24 @@ Global hooks (`b3SetAllocator` → `FMemory::Malloc/Free`, `b3SetAssertFcn`,
 
 ## Threading
 
-M0/M1 run with `workerCount = 1` (single-threaded stepping on the game thread).
-Box3D's internal scheduler (raw `CreateThread` workers) or UE task-system callbacks
-come in M5. Note the contract in `types.h`: `b3World_Step` blocks across fork/join, so
-if we drive it from a UE worker it must be a thread that can block safely — never a
-task-graph job that can't park its stack.
+`b3World_Step` runs on the game thread. With `WorkerCount > 1` it forks solver tasks
+through the world's task callbacks and blocks in `finishTask` across every fork/join —
+safe here because the game thread may block freely, and the calling thread doubles as
+worker 0 (box3d's orchestrator CAS guarantees progress even if the task system runs
+tasks late, out of order, or inline).
+
+`FBox3DUETaskPool` (M5) bridges the callbacks onto `UE::Tasks`: enqueue launches a
+high-priority task into a fixed `B3_MAX_TASKS` slot array (box3d wants stable task
+pointers; the slot counter is atomic because the solve orchestrator enqueues follow-up
+tasks from worker threads), finish is `FTask::Wait()` — which, when called from inside
+a worker, retracts or helps instead of deadlocking, the same strategy as box3d's
+in-tree scheduler. Task names from box3d can live in stack buffers, so they are not
+retained. `UBox3DSettings::TaskSystem` picks UE tasks (default — no extra threads) or
+box3d's internal scheduler (dedicated threads); `WorkerCount = 1` (default) stays
+fully serial. `box3d.Benchmark` compares the three configurations on a target machine.
+
+The step is deterministic across worker counts and schedulers
+(`Box3DUnreal.Threading.SchedulerEquivalence` pins this).
 
 ## Naming
 

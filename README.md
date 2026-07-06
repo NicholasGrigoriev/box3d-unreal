@@ -8,7 +8,7 @@ UnrealBuildTool; the plugin is fully standalone with no external build steps.
 
 ## Status
 
-**Alpha / M4 complete.** The library compiles inside UE, a physics world is
+**Alpha / M5 complete.** The library compiles inside UE, a physics world is
 stepped per game world at a fixed timestep, `UBox3DBodyComponent` gives actors Box3D
 rigid bodies with transform sync in both directions — primitive shapes
 (box/sphere/capsule with auto-fit), cooked convex hulls, exact triangle meshes, and
@@ -17,11 +17,14 @@ and physical materials. `UBox3DQueryLibrary` exposes ray/shape casts, overlaps, 
 character-mover collide-and-slide helpers to Blueprint. Seven joint component types
 (distance/revolute/prismatic/spherical/weld/motor/wheel) with limits, motors,
 springs, and breakage, plus contact/hit/sensor events as Blueprint delegates.
+Multithreaded stepping rides UE's task system (or box3d's internal scheduler) —
+5.1× on a 16-core 5k-body pile, deterministic across worker counts — with
+`stat box3d`, `box3d.DebugDraw` wireframes, and `box3d.Benchmark` for tuning.
 Landscape height fields are deferred. All of it is pinned by a deterministic
-automation suite — 33 tests (`Automation RunTests Box3DUnreal`, see
-[docs/TESTING.md](docs/TESTING.md)). Next up: M5 — threading and performance. See
-[docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap and
-[docs/DESIGN.md](docs/DESIGN.md) for architecture decisions.
+automation suite — 36 tests (`Automation RunTests Box3DUnreal`, see
+[docs/TESTING.md](docs/TESTING.md)). Next up: M6 — polish (determinism validation,
+replay, CCD guidance). See [docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap
+and [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions.
 
 ## Install
 
@@ -30,9 +33,9 @@ Requires UE 5.7, C++ project.
 
 ## Tests
 
-33 automation tests cover conversion math, world stepping, body components, queries,
-mesh cooking, joints, and gameplay events with analytic assertions
-([docs/TESTING.md](docs/TESTING.md)):
+36 automation tests cover conversion math, world stepping, body components, queries,
+mesh cooking, joints, gameplay events, threading, and diagnostics with analytic
+assertions ([docs/TESTING.md](docs/TESTING.md)):
 
 ```
 Automation RunTests Box3DUnreal
@@ -57,6 +60,11 @@ box3d.SmokeActors
 ```
 
 Either command with `0` clears its bodies.
+
+Also useful: `box3d.DebugDraw 1` (wireframes of every physics shape, plus
+`box3d.DebugDraw.Contacts/Bounds/Mass/...`), `stat box3d` (step profile and world
+counters), and `box3d.Benchmark` (scheduler comparison for sizing
+`WorkerCount`/`TaskSystem` in Project Settings).
 
 ## Modules
 

@@ -33,7 +33,7 @@ The report directory receives `index.json` with pass/fail per test.
 `Test.Step(N)` runs exactly N fixed steps, so every assertion is frame-exact and
 deterministic. No latent commands, no wall-clock waits.
 
-## Coverage matrix (M0–M3)
+## Coverage matrix
 
 | Area | Behavior | Test |
 | --- | --- | --- |
@@ -70,6 +70,9 @@ deterministic. No latent commands, no wall-clock waits.
 | M4 events | contact begin on landing (other resolved), end on separation, silent without the flag | `Events.ContactBeginEnd` |
 | M4 events | hit event: free-fall approach speed, normal toward self | `Events.HitApproachSpeed` |
 | M4 events | sensor begin/end on pass-through, visitor resolved, no collision response | `Events.SensorOverlap` |
+| M5 threading | UE-tasks and internal-scheduler runs match a serial run on a 180-body pile; tasks actually reach UE workers | `Threading.SchedulerEquivalence` |
+| M5 diagnostics | GetWorldStats (the `stat box3d` data): profile times measured, body/shape/contact/joint/island/awake counters, memory | `Diagnostics.WorldStats` |
+| M5 diagnostics | debug-shape cache: lazy one-entry-per-shape build, exact wireframe point counts per shape type, reuse on redraw, release on shape destroy | `Diagnostics.DebugDrawCache` |
 
 ## Known gaps (deliberate)
 
@@ -88,7 +91,12 @@ deterministic. No latent commands, no wall-clock waits.
   cylinder (no simple collision → render fallback) are covered.
 - **Landscape height fields, `b3CreateCompound`** — deferred features (see
   MILESTONES M3 notes); no tests until implemented.
-- **Threading (`WorkerCount > 1`)** — M5 scope.
+- **`stat box3d` display plumbing** — the SET_*_STAT macros are engine-side; the
+  values feeding them are asserted through `GetWorldStats`.
+- **The DrawDebugHelpers pass** (`box3d.DebugDraw` CVar path) — line-batcher
+  output is eyeball-only; the shape cache and `b3World_Draw` dispatch it rides on
+  are asserted with counting callbacks.
+- **`box3d.Benchmark`** — a measurement tool, not a test; results vary by machine.
 
 ## Smoke commands
 
