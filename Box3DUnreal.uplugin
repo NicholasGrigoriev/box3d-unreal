@@ -1,0 +1,30 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "Box3D Unreal",
+	"Description": "Unreal Engine integration for Box3D, Erin Catto's 3D rigid body physics engine. Vendored box3d v0.1.0 compiled from source.",
+	"Category": "Physics",
+	"CreatedBy": "Nicholas Grigoriev",
+	"CreatedByURL": "https://github.com/NicholasGrigoriev",
+	"DocsURL": "https://box2d.org/posts/2026/06/announcing-box3d/",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"EngineVersion": "5.7.0",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "Box3DCore",
+			"Type": "Runtime",
+			"LoadingPhase": "PreDefault"
+		},
+		{
+			"Name": "Box3DRuntime",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}

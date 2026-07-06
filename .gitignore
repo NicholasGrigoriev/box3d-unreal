@@ -1,0 +1,14 @@
+# UE build artifacts
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+
+# IDE
+.vs/
+.idea/
+*.sln.DotSettings.user
+
+# OS
+Thumbs.db
+.DS_Store
