@@ -10,6 +10,7 @@ class UBox3DBodyComponent;
 class UBox3DJointComponent;
 class FBox3DUETaskPool;
 class FBox3DDebugDrawer;
+class FBox3DStaticSceneMirror;
 struct b3Recording;
 
 /// Snapshot of box3d's per-step profile and simulation counters, readable from
@@ -80,6 +81,7 @@ public:
 
 	//~ UWorldSubsystem
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
+	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
 
 	//~ FTickableGameObject
 	virtual void Tick(float DeltaTime) override;
@@ -104,6 +106,9 @@ public:
 	/// Debug-shape wireframe cache; always registered with the world (populated
 	/// lazily on first draw, so it costs nothing until debug draw is used).
 	FBox3DDebugDrawer* GetDebugDrawer() const { return DebugDrawer.Get(); }
+
+	/// Static level-geometry mirror, or null when disabled in settings.
+	FBox3DStaticSceneMirror* GetStaticMirror() const { return StaticMirror.Get(); }
 
 	//~ Recording (box3d's determinism-validated record/replay) ------------------
 
@@ -144,6 +149,10 @@ public:
 	/// before each tick's stepping until creation succeeds or attempts run out.
 	void AddPendingJoint(UBox3DJointComponent* Joint);
 
+	/// Drop a body's interpolation segment after an explicit teleport so the next
+	/// segment starts from the teleported pose instead of rubber-banding.
+	void InvalidateInterpolation(UBox3DBodyComponent* Component);
+
 #if !UE_BUILD_SHIPPING
 	/// Smoke test (box3d.Smoke): drop debug-drawn bodies onto a static ground slab.
 	void SpawnSmokeBodies(int32 Count);
@@ -154,6 +163,13 @@ private:
 	void StepFixed(float FixedDeltaTime, int32 SubSteps);
 	void PushKinematicTargets(float FixedDeltaTime);
 	void SyncMovedBodies();
+
+	/// Interpolated rendering (bInterpolateBodyTransforms): instead of writing move
+	/// events straight to components, record per-body step segments...
+	void RecordMovedBodies();
+	/// ...and every tick place components at Lerp(prev, curr, Accumulator/FixedDt).
+	/// Costs up to one fixed step of visual latency.
+	void ApplyInterpolatedTransforms(float FixedDeltaTime);
 
 	/// Retry joints whose bodies were missing at BeginPlay.
 	void CreatePendingJoints();
@@ -181,6 +197,10 @@ private:
 	/// first drawn and when they are destroyed. Must outlive the b3 world.
 	TPimplPtr<FBox3DDebugDrawer> DebugDrawer;
 
+	/// Mirrors static level geometry into raw static bodies (settings-gated).
+	/// Shut down before the world dies; its bodies live in the b3 world.
+	TPimplPtr<FBox3DStaticSceneMirror> StaticMirror;
+
 	/// Reusable recording buffer (box3d resets it on each StartRecording).
 	/// Destroyed after the world in Deinitialize; plain pointer because the C
 	/// struct is opaque and freed via b3DestroyRecording.
@@ -189,6 +209,18 @@ private:
 
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> KinematicBodies;
 	TArray<TWeakObjectPtr<UBox3DJointComponent>> PendingJoints;
+
+	/// One segment per dynamic body that moved: pose at the previous and latest
+	/// fixed step, plus which step produced P1 (stale segments snap and drop).
+	struct FInterpState
+	{
+		FVector P0 = FVector::ZeroVector;
+		FVector P1 = FVector::ZeroVector;
+		FQuat Q0 = FQuat::Identity;
+		FQuat Q1 = FQuat::Identity;
+		uint64 Step = 0;
+	};
+	TMap<TWeakObjectPtr<UBox3DBodyComponent>, FInterpState> InterpStates;
 
 #if !UE_BUILD_SHIPPING
 	void DrawSmokeBodies() const;

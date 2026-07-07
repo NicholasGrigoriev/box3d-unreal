@@ -1,13 +1,22 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "box3d/id.h"
 
+class UBodySetup;
 class UStaticMesh;
 typedef struct b3MeshData b3MeshData;
 typedef struct b3HullData b3HullData;
+typedef struct b3ShapeDef b3ShapeDef;
 
 namespace Box3D
 {
+	/// One b3 shape per authored collision element of the body setup (sphere, capsule,
+	/// box, and convex elements), scale baked per axis (rotation with non-uniform scale
+	/// is approximated the same way UE itself does). Returns the number of shapes created.
+	BOX3DRUNTIME_API int32 CreateShapesFromBodySetup(b3BodyId BodyId, b3ShapeDef& ShapeDef,
+		const UBodySetup& BodySetup, const FVector& Scale);
+
 	/// Cooked triangle mesh for a static mesh asset (LOD0 render triangles),
 	/// unscaled — scale is applied at shape creation. Cached per asset; the cache
 	/// owns the data and keeps it alive for the module's lifetime because mesh

@@ -15,76 +15,6 @@
 
 namespace
 {
-	/// One b3 shape per authored collision element, scale baked per axis (rotation
-	/// with non-uniform scale is approximated the same way UE itself does).
-	/// Returns the number of shapes created.
-	int32 CreateShapesFromBodySetup(b3BodyId BodyId, b3ShapeDef& ShapeDef, const UBodySetup& BodySetup,
-		const FVector& Scale)
-	{
-		const FVector AbsScale = Scale.GetAbs();
-		const b3Transform IdentityB3{ { 0, 0, 0 }, { { 0, 0, 0 }, 1.0f } };
-		int32 Created = 0;
-
-		for (const FKSphereElem& Elem : BodySetup.AggGeom.SphereElems)
-		{
-			const b3Sphere Sphere{ Box3D::ToB3(FVector(Elem.Center) * Scale),
-								   Elem.Radius * AbsScale.GetMin() * Box3D::UEToMeters };
-			b3CreateSphereShape(BodyId, &ShapeDef, &Sphere);
-			++Created;
-		}
-
-		for (const FKSphylElem& Elem : BodySetup.AggGeom.SphylElems)
-		{
-			const FVector AxisOffset = Elem.Rotation.RotateVector(FVector(0, 0, Elem.Length * 0.5));
-			const b3Capsule Capsule{
-				Box3D::ToB3((FVector(Elem.Center) - AxisOffset) * Scale),
-				Box3D::ToB3((FVector(Elem.Center) + AxisOffset) * Scale),
-				Elem.Radius * FMath::Min(AbsScale.X, AbsScale.Y) * Box3D::UEToMeters };
-			b3CreateCapsuleShape(BodyId, &ShapeDef, &Capsule);
-			++Created;
-		}
-
-		for (const FKBoxElem& Elem : BodySetup.AggGeom.BoxElems)
-		{
-			// b3MakeScaledBoxHull exists for exactly this: editor-scaled, rotated boxes.
-			const b3Vec3 HalfWidths{ Elem.X * 0.5f * Box3D::UEToMeters,
-									 Elem.Y * 0.5f * Box3D::UEToMeters,
-									 Elem.Z * 0.5f * Box3D::UEToMeters };
-			const b3Transform LocalTransform{ Box3D::ToB3(FVector(Elem.Center)),
-											  Box3D::ToB3(Elem.Rotation.Quaternion()) };
-			const b3BoxHull Hull = b3MakeScaledBoxHull(HalfWidths, LocalTransform, Box3D::ToB3Dir(Scale));
-			b3CreateHullShape(BodyId, &ShapeDef, &Hull.base);
-			++Created;
-		}
-
-		for (const FKConvexElem& Elem : BodySetup.AggGeom.ConvexElems)
-		{
-			const FTransform ElemTransform = Elem.GetTransform();
-			TArray<b3Vec3> Points;
-			Points.Reserve(Elem.VertexData.Num());
-			for (const FVector& Vertex : Elem.VertexData)
-			{
-				Points.Add(Box3D::ToB3(ElemTransform.TransformPosition(Vertex) * Scale));
-			}
-			if (Points.Num() < 4)
-			{
-				continue;
-			}
-			if (b3HullData* Hull = b3CreateHull(Points.GetData(), Points.Num(), 64))
-			{
-				// Hull shapes clone the data, so the temp cook is freed immediately.
-				b3CreateHullShape(BodyId, &ShapeDef, Hull);
-				b3DestroyHull(Hull);
-				++Created;
-			}
-		}
-
-		return Created;
-	}
-}
-
-namespace
-{
 	// UE gameplay units -> box3d SI: one factor of 0.01 per length dimension.
 	constexpr float ForceScale = 0.01f;   // kg*cm/s^2 -> N, kg*cm/s -> kg*m/s
 	constexpr float TorqueScale = 0.0001f; // kg*cm^2/s^2 -> N*m, kg*cm^2/s -> kg*m^2/s
@@ -232,7 +162,7 @@ void UBox3DBodyComponent::CreateShape(const FVector& WorldScale)
 			const UBodySetup* BodySetup = Mesh->GetBodySetup();
 			if (BodySetup && BodySetup->AggGeom.GetElementCount() > 0)
 			{
-				const int32 Created = CreateShapesFromBodySetup(BodyId, ShapeDef, *BodySetup, MeshScaleUE);
+				const int32 Created = Box3D::CreateShapesFromBodySetup(BodyId, ShapeDef, *BodySetup, MeshScaleUE);
 				if (Created > 0)
 				{
 					break;
@@ -332,6 +262,15 @@ void UBox3DBodyComponent::OnUpdateTransform(EUpdateTransformFlags UpdateTransfor
 	if (bPushTransform)
 	{
 		b3Body_SetTransform(BodyId, Box3D::ToB3Pos(GetComponentLocation()), Box3D::ToB3(GetComponentQuat()));
+
+		// A teleported dynamic body must not blend from its pre-teleport segment.
+		if (BodyType == EBox3DBodyType::Dynamic && Teleport != ETeleportType::None)
+		{
+			if (UBox3DWorldSubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UBox3DWorldSubsystem>() : nullptr)
+			{
+				Subsystem->InvalidateInterpolation(this);
+			}
+		}
 	}
 }
 
@@ -386,6 +325,23 @@ void UBox3DBodyComponent::AddImpulse(FVector Impulse)
 	if (b3Body_IsValid(BodyId))
 	{
 		b3Body_ApplyLinearImpulseToCenter(BodyId, Box3D::ToB3Dir(Impulse * ForceScale), /*wake*/ true);
+	}
+}
+
+void UBox3DBodyComponent::AddImpulseAtLocation(FVector Impulse, FVector Location)
+{
+	if (b3Body_IsValid(BodyId))
+	{
+		b3Body_ApplyLinearImpulse(BodyId, Box3D::ToB3Dir(Impulse * ForceScale), Box3D::ToB3Pos(Location),
+			/*wake*/ true);
+	}
+}
+
+void UBox3DBodyComponent::AddForceAtLocation(FVector Force, FVector Location)
+{
+	if (b3Body_IsValid(BodyId))
+	{
+		b3Body_ApplyForce(BodyId, Box3D::ToB3Dir(Force * ForceScale), Box3D::ToB3Pos(Location), /*wake*/ true);
 	}
 }
 

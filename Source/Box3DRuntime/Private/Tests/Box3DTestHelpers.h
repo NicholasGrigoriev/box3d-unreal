@@ -48,6 +48,51 @@ namespace Box3DTest
 		}
 	};
 
+	/// Temporarily enable the static scene mirror on the settings CDO. Construct
+	/// BEFORE the FTestWorld (the subsystem creates the mirror in Initialize).
+	/// Note FTestWorld never fires OnWorldBeginPlay: tests call MirrorLevel on the
+	/// persistent level explicitly after spawning their geometry.
+	struct FScopedMirrorSettings
+	{
+		bool bSavedMirror;
+		EBox3DMirrorGeometry SavedGeometry;
+
+		explicit FScopedMirrorSettings(EBox3DMirrorGeometry Geometry = EBox3DMirrorGeometry::TriangleMesh)
+		{
+			UBox3DSettings* Settings = GetMutableDefault<UBox3DSettings>();
+			bSavedMirror = Settings->bMirrorStaticGeometry;
+			SavedGeometry = Settings->MirrorGeometry;
+			Settings->bMirrorStaticGeometry = true;
+			Settings->MirrorGeometry = Geometry;
+		}
+
+		~FScopedMirrorSettings()
+		{
+			UBox3DSettings* Settings = GetMutableDefault<UBox3DSettings>();
+			Settings->bMirrorStaticGeometry = bSavedMirror;
+			Settings->MirrorGeometry = SavedGeometry;
+		}
+	};
+
+	/// Temporarily enable interpolated body transforms (read live each Tick, so the
+	/// scope only needs to cover the ticks under test).
+	struct FScopedInterpolationSettings
+	{
+		bool bSaved;
+
+		FScopedInterpolationSettings()
+		{
+			UBox3DSettings* Settings = GetMutableDefault<UBox3DSettings>();
+			bSaved = Settings->bInterpolateBodyTransforms;
+			Settings->bInterpolateBodyTransforms = true;
+		}
+
+		~FScopedInterpolationSettings()
+		{
+			GetMutableDefault<UBox3DSettings>()->bInterpolateBodyTransforms = bSaved;
+		}
+	};
+
 	/// A minimal begun-play game world with a live Box3D subsystem, torn down on
 	/// scope exit (which also exercises world destruction each test). Stepping is
 	/// driven manually through the subsystem so tests are frame-exact.
@@ -146,6 +191,31 @@ namespace Box3DTest
 		MeshComponent->RegisterComponent();
 		Body->RegisterComponent();
 		return Body;
+	}
+
+	/// The engine's 100 cm basic cube — the standard test mesh (authored box
+	/// collision element plus render geometry, so every cook path works).
+	inline UStaticMesh* LoadCubeMesh()
+	{
+		return LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	}
+
+	/// Spawn an actor whose root is a bare UStaticMeshComponent (no Box3D body) —
+	/// the raw material of the static scene mirror. Mesh/mobility/collision are set
+	/// before registration so Static mobility never trips runtime-change guards.
+	inline UStaticMeshComponent* SpawnSceneMesh(UWorld* World, UStaticMesh* Mesh, const FTransform& Transform,
+		EComponentMobility::Type Mobility = EComponentMobility::Static,
+		ECollisionEnabled::Type Collision = ECollisionEnabled::QueryAndPhysics)
+	{
+		AActor* Actor = World->SpawnActor<AActor>();
+		UStaticMeshComponent* Component = NewObject<UStaticMeshComponent>(Actor, TEXT("SceneMesh"));
+		Component->SetMobility(Mobility);
+		Component->SetStaticMesh(Mesh);
+		Component->SetCollisionEnabled(Collision);
+		Actor->SetRootComponent(Component);
+		Component->SetWorldTransform(Transform);
+		Component->RegisterComponent();
+		return Component;
 	}
 
 	/// Static box ground spanning +-1000 cm in XY with its top face at TopZ.

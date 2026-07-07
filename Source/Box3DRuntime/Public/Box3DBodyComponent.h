@@ -250,6 +250,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Box3D")
 	void AddImpulse(FVector Impulse);
 
+	/// Apply an instantaneous impulse (kg*cm/s) at a world location (cm). Off-center
+	/// application imparts spin. Wakes the body.
+	UFUNCTION(BlueprintCallable, Category = "Box3D")
+	void AddImpulseAtLocation(FVector Impulse, FVector Location);
+
+	/// Apply a force (kg*cm/s^2) at a world location (cm). Wakes the body.
+	UFUNCTION(BlueprintCallable, Category = "Box3D")
+	void AddForceAtLocation(FVector Force, FVector Location);
+
 	/// Apply a torque (kg*cm^2/s^2 around world axes). Wakes the body.
 	UFUNCTION(BlueprintCallable, Category = "Box3D")
 	void AddTorque(FVector Torque);

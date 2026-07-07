@@ -6,6 +6,7 @@
 #include "Box3DJointComponent.h"
 #include "Box3DRuntime.h"
 #include "Box3DSettings.h"
+#include "Box3DStaticSceneMirror.h"
 #include "Box3DTaskSystem.h"
 #include "Box3DTypes.h"
 #include "DrawDebugHelpers.h"
@@ -66,6 +67,12 @@ void UBox3DWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Accumulator = 0.0f;
 	StepCount = 0;
 
+	if (Settings->bMirrorStaticGeometry)
+	{
+		StaticMirror = MakePimpl<FBox3DStaticSceneMirror>();
+		StaticMirror->Initialize(GetWorld(), WorldId);
+	}
+
 	UE_LOG(LogBox3D, Log, TEXT("Box3D world created for %s (gravity=%s cm/s^2, workers=%d, scheduler=%s)"),
 		*GetNameSafe(GetWorld()), *Settings->Gravity.ToCompactString(), Settings->WorkerCount,
 		Settings->WorkerCount <= 1 ? TEXT("serial")
@@ -77,6 +84,13 @@ void UBox3DWorldSubsystem::Deinitialize()
 #if !UE_BUILD_SHIPPING
 	ClearSmokeBodies();
 #endif
+
+	// Before the world: destroys mirror bodies and unhooks level delegates while
+	// the b3 world can still accept b3DestroyBody.
+	if (StaticMirror.IsValid())
+	{
+		StaticMirror->Shutdown();
+	}
 
 	if (b3World_IsValid(WorldId))
 	{
@@ -94,6 +108,7 @@ void UBox3DWorldSubsystem::Deinitialize()
 		Recording = nullptr;
 	}
 	bRecordingActive = false;
+	StaticMirror.Reset();
 	DebugDrawer.Reset();
 	TaskPool.Reset();
 
@@ -103,6 +118,16 @@ void UBox3DWorldSubsystem::Deinitialize()
 bool UBox3DWorldSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
 	return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
+}
+
+void UBox3DWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
+{
+	Super::OnWorldBeginPlay(InWorld);
+
+	if (StaticMirror.IsValid())
+	{
+		StaticMirror->MirrorInitialLevels();
+	}
 }
 
 void UBox3DWorldSubsystem::Tick(float DeltaTime)
@@ -120,6 +145,12 @@ void UBox3DWorldSubsystem::Tick(float DeltaTime)
 
 	CreatePendingJoints();
 
+	// Mirror work left over from a budgeted stream-in drain.
+	if (StaticMirror.IsValid() && StaticMirror->HasPendingWork())
+	{
+		StaticMirror->DrainQueue(Settings->MirrorTimeBudgetMs);
+	}
+
 	// Fixed-step accumulator; drop time beyond the per-frame budget so a hitch
 	// cannot snowball into ever-longer frames.
 	Accumulator = FMath::Min(Accumulator + DeltaTime, Settings->MaxStepsPerTick * FixedDt);
@@ -135,7 +166,16 @@ void UBox3DWorldSubsystem::Tick(float DeltaTime)
 		bStepped = true;
 	}
 
-	if (bStepped)
+	if (Settings->bInterpolateBodyTransforms)
+	{
+		if (bStepped)
+		{
+			RecordMovedBodies();
+		}
+		// Every tick, stepped or not: Alpha keeps advancing toward the latest step.
+		ApplyInterpolatedTransforms(FixedDt);
+	}
+	else if (bStepped)
 	{
 		SyncMovedBodies();
 	}
@@ -316,17 +356,84 @@ void UBox3DWorldSubsystem::SyncMovedBodies()
 {
 	// Move events cover the last step only; called once after the final step of the
 	// tick. userData is the owning component, kept valid because bodies are always
-	// destroyed in the component's EndPlay.
+	// destroyed in the component's EndPlay. Only dynamic bodies sync back: static
+	// and kinematic components drive their bodies, and writing the (lagging)
+	// physics pose into an attached kinematic component would corrupt its relative
+	// transform (e.g. a pawn proxy hanging off a capsule).
 	const b3BodyEvents Events = b3World_GetBodyEvents(WorldId);
 	for (int32 Index = 0; Index < Events.moveCount; ++Index)
 	{
 		const b3BodyMoveEvent& Move = Events.moveEvents[Index];
 		UBox3DBodyComponent* Component = static_cast<UBox3DBodyComponent*>(Move.userData);
-		if (Component != nullptr && IsValid(Component))
+		if (Component != nullptr && IsValid(Component) && Component->BodyType == EBox3DBodyType::Dynamic)
 		{
 			Component->SyncTransformFromPhysics(Box3D::ToUEPos(Move.transform.p), Box3D::ToUE(Move.transform.q));
 		}
 	}
+}
+
+void UBox3DWorldSubsystem::RecordMovedBodies()
+{
+	const b3BodyEvents Events = b3World_GetBodyEvents(WorldId);
+	for (int32 Index = 0; Index < Events.moveCount; ++Index)
+	{
+		const b3BodyMoveEvent& Move = Events.moveEvents[Index];
+		UBox3DBodyComponent* Component = static_cast<UBox3DBodyComponent*>(Move.userData);
+		if (Component == nullptr || !IsValid(Component) || Component->BodyType != EBox3DBodyType::Dynamic)
+		{
+			continue;
+		}
+
+		FInterpState& State = InterpStates.FindOrAdd(Component);
+		if (State.Step == 0)
+		{
+			// New segment: start from wherever the component renders right now.
+			State.P0 = Component->GetComponentLocation();
+			State.Q0 = Component->GetComponentQuat();
+		}
+		else
+		{
+			State.P0 = State.P1;
+			State.Q0 = State.Q1;
+		}
+		State.P1 = Box3D::ToUEPos(Move.transform.p);
+		State.Q1 = Box3D::ToUE(Move.transform.q);
+		State.Step = StepCount;
+	}
+}
+
+void UBox3DWorldSubsystem::ApplyInterpolatedTransforms(float FixedDeltaTime)
+{
+	const float Alpha = FMath::Clamp(Accumulator / FixedDeltaTime, 0.0f, 1.0f);
+
+	for (auto It = InterpStates.CreateIterator(); It; ++It)
+	{
+		UBox3DBodyComponent* Component = It.Key().Get();
+		if (Component == nullptr || !IsValid(Component))
+		{
+			It.RemoveCurrent();
+			continue;
+		}
+
+		const FInterpState& State = It.Value();
+		if (State.Step == StepCount)
+		{
+			Component->SyncTransformFromPhysics(FMath::Lerp(State.P0, State.P1, Alpha),
+				FQuat::Slerp(State.Q0, State.Q1, Alpha).GetNormalized());
+		}
+		else
+		{
+			// No move event in the latest step: the body settled. Land exactly on
+			// the final pose and stop tracking it.
+			Component->SyncTransformFromPhysics(State.P1, State.Q1);
+			It.RemoveCurrent();
+		}
+	}
+}
+
+void UBox3DWorldSubsystem::InvalidateInterpolation(UBox3DBodyComponent* Component)
+{
+	InterpStates.Remove(Component);
 }
 
 FBox3DWorldStats UBox3DWorldSubsystem::GetWorldStats() const

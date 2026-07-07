@@ -6,6 +6,7 @@
 #include "PhysicsEngine/BodySetup.h"
 #include "StaticMeshResources.h"
 #include "UObject/ObjectKey.h"
+#include "box3d/box3d.h"
 #include "box3d/collision.h"
 
 namespace
@@ -62,6 +63,69 @@ namespace
 
 namespace Box3D
 {
+	int32 CreateShapesFromBodySetup(b3BodyId BodyId, b3ShapeDef& ShapeDef, const UBodySetup& BodySetup,
+		const FVector& Scale)
+	{
+		const FVector AbsScale = Scale.GetAbs();
+		int32 Created = 0;
+
+		for (const FKSphereElem& Elem : BodySetup.AggGeom.SphereElems)
+		{
+			const b3Sphere Sphere{ Box3D::ToB3(FVector(Elem.Center) * Scale),
+								   Elem.Radius * AbsScale.GetMin() * Box3D::UEToMeters };
+			b3CreateSphereShape(BodyId, &ShapeDef, &Sphere);
+			++Created;
+		}
+
+		for (const FKSphylElem& Elem : BodySetup.AggGeom.SphylElems)
+		{
+			const FVector AxisOffset = Elem.Rotation.RotateVector(FVector(0, 0, Elem.Length * 0.5));
+			const b3Capsule Capsule{
+				Box3D::ToB3((FVector(Elem.Center) - AxisOffset) * Scale),
+				Box3D::ToB3((FVector(Elem.Center) + AxisOffset) * Scale),
+				Elem.Radius * FMath::Min(AbsScale.X, AbsScale.Y) * Box3D::UEToMeters };
+			b3CreateCapsuleShape(BodyId, &ShapeDef, &Capsule);
+			++Created;
+		}
+
+		for (const FKBoxElem& Elem : BodySetup.AggGeom.BoxElems)
+		{
+			// b3MakeScaledBoxHull exists for exactly this: editor-scaled, rotated boxes.
+			const b3Vec3 HalfWidths{ Elem.X * 0.5f * Box3D::UEToMeters,
+									 Elem.Y * 0.5f * Box3D::UEToMeters,
+									 Elem.Z * 0.5f * Box3D::UEToMeters };
+			const b3Transform LocalTransform{ Box3D::ToB3(FVector(Elem.Center)),
+											  Box3D::ToB3(Elem.Rotation.Quaternion()) };
+			const b3BoxHull Hull = b3MakeScaledBoxHull(HalfWidths, LocalTransform, Box3D::ToB3Dir(Scale));
+			b3CreateHullShape(BodyId, &ShapeDef, &Hull.base);
+			++Created;
+		}
+
+		for (const FKConvexElem& Elem : BodySetup.AggGeom.ConvexElems)
+		{
+			const FTransform ElemTransform = Elem.GetTransform();
+			TArray<b3Vec3> Points;
+			Points.Reserve(Elem.VertexData.Num());
+			for (const FVector& Vertex : Elem.VertexData)
+			{
+				Points.Add(Box3D::ToB3(ElemTransform.TransformPosition(Vertex) * Scale));
+			}
+			if (Points.Num() < 4)
+			{
+				continue;
+			}
+			if (b3HullData* Hull = b3CreateHull(Points.GetData(), Points.Num(), 64))
+			{
+				// Hull shapes clone the data, so the temp cook is freed immediately.
+				b3CreateHullShape(BodyId, &ShapeDef, Hull);
+				b3DestroyHull(Hull);
+				++Created;
+			}
+		}
+
+		return Created;
+	}
+
 	const b3MeshData* GetOrCreateMeshData(UStaticMesh* Mesh)
 	{
 		if (Mesh == nullptr)

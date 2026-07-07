@@ -24,7 +24,17 @@ Multithreaded stepping rides UE's task system (or box3d's internal scheduler) �
 Recording/replay with hash-based determinism validation (`box3d.RecordStart/Stop`,
 `box3d.ValidateReplay`), continuous collision for fast movers, and an optional
 `BOX3D_DOUBLE_PRECISION` large-world build. Landscape height fields are deferred.
-All of it is pinned by a deterministic automation suite — 40 tests
+
+Post-M6 world integration: a **static scene mirror** (settings-gated) that cooks
+every qualifying static mesh component — ISM/HISM instances included — into raw
+Box3D static bodies at level load and follows level streaming / World Partition,
+so dynamic bodies rest on existing maps with zero per-actor setup;
+`ABox3DPropActor` plus `Box3D::ConvertToProp` / `box3d.MakeProp` to turn any
+placed static mesh (or ISM instance) into a live physics prop whose mesh keeps
+Chaos query collision for unchanged gameplay traces; `AddImpulseAtLocation` /
+`AddForceAtLocation` on the body component; and optional render interpolation
+between fixed steps (`bInterpolateBodyTransforms`) for high-refresh displays.
+All of it is pinned by a deterministic automation suite — 48 tests
 (`Automation RunTests Box3DUnreal`, see [docs/TESTING.md](docs/TESTING.md)).
 See [docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap,
 [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions, and
