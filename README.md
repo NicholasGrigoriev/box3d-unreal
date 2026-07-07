@@ -36,11 +36,18 @@ Chaos query collision for unchanged gameplay traces; `AddImpulseAtLocation` /
 between fixed steps (`bInterpolateBodyTransforms`) for high-refresh displays.
 Soft-body actors built from raw bodies behind purely visual skins:
 `ABox3DRopeActor` (capsule chain + spherical joints, rendered as spline meshes;
-pin the far end or `AttachActorToEnd` at runtime) and `ABox3DClothActor`
-(sphere-particle lattice + distance-joint stitching, rendered as a procedural
-mesh with per-frame normals) — both interpolate between fixed steps and spawn
-at the crosshair via `box3d.SpawnRope` / `box3d.SpawnCloth`.
-All of it is pinned by a deterministic automation suite — 51 tests
+pin the far end, `AttachActorToEnd` at runtime, or snap it via `LinkBreakForce`
+/ `CutLink`) and `ABox3DClothActor` (sphere-particle lattice + distance-joint
+stitching, rendered as a double-sided procedural mesh with per-frame normals,
+material hot-swappable) — both interpolate between fixed steps, preview their
+rest shape in the editor, and spawn at the crosshair via `box3d.SpawnRope` /
+`box3d.SpawnCloth`. Plus a special-actor zoo: `ABox3DBreakableActor` (child
+meshes become welded chunks that shatter past a break force —
+`box3d.SpawnBreakable`), `ABox3DConveyorActor` (box3d surface-material tangent
+velocity drags resting bodies), and `ABox3DWindActor` (per-fixed-step drag
+forces via the subsystem's `OnPreStep` hook; directional, turbulence,
+spline-following, or vortex fields — `box3d.SpawnWind`).
+All of it is pinned by a deterministic automation suite — 55 tests
 (`Automation RunTests Box3DUnreal`, see [docs/TESTING.md](docs/TESTING.md)).
 See [docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap,
 [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions, and

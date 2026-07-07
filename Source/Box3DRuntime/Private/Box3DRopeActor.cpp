@@ -40,6 +40,36 @@ ABox3DRopeActor::ABox3DRopeActor()
 	RopeMesh = CylinderFinder.Object;
 }
 
+void ABox3DRopeActor::OnConstruction(const FTransform& Transform)
+{
+	Super::OnConstruction(Transform);
+	// Editor preview: the straight rest shape, no physics. In game, BuildRope
+	// rebuilds the skin itself and the simulation takes over.
+	if (HasActorBegunPlay())
+	{
+		return;
+	}
+
+	const int32 Count = FMath::Clamp(NumSegments, 2, 64);
+	SegmentLength = FMath::Max(RopeLength, 10.0f) / Count;
+	BuildSkin();
+
+	const FVector Start = GetActorLocation();
+	FVector Dir = FVector::DownVector;
+	if (bPinEnd)
+	{
+		Dir = (GetActorTransform().TransformPosition(EndPinLocation) - Start)
+			.GetSafeNormal(UE_SMALL_NUMBER, FVector::DownVector);
+	}
+	TArray<FVector> Points;
+	Points.Reserve(Count + 1);
+	for (int32 Index = 0; Index <= Count; ++Index)
+	{
+		Points.Add(Start + Dir * (SegmentLength * Index));
+	}
+	ApplyPointsToSkin(Points);
+}
+
 void ABox3DRopeActor::BeginPlay()
 {
 	Super::BeginPlay();
@@ -50,6 +80,67 @@ void ABox3DRopeActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	DestroyRope();
 	Super::EndPlay(EndPlayReason);
+}
+
+void ABox3DRopeActor::BuildSkin()
+{
+	for (USplineMeshComponent* Segment : SegmentMeshes)
+	{
+		if (Segment != nullptr)
+		{
+			Segment->DestroyComponent();
+		}
+	}
+	SegmentMeshes.Reset();
+
+	const int32 Count = FMath::Clamp(NumSegments, 2, 64);
+	const float MeshRadius = RopeMesh ? FMath::Max<float>(RopeMesh->GetBounds().BoxExtent.X, 1.0f) : 50.0f;
+	const FVector2D SectionScale(RopeRadius / MeshRadius);
+	SegmentMeshes.Reserve(Count);
+	for (int32 Index = 0; Index < Count; ++Index)
+	{
+		USplineMeshComponent* Segment = NewObject<USplineMeshComponent>(this, NAME_None, RF_Transient);
+		Segment->SetMobility(EComponentMobility::Movable);
+		Segment->SetupAttachment(GetRootComponent());
+		Segment->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Segment->SetCastShadow(bCastShadow);
+		Segment->SetForwardAxis(RopeMeshAxis, false);
+		Segment->SetStaticMesh(RopeMesh);
+		if (RopeMaterial != nullptr)
+		{
+			Segment->SetMaterial(0, RopeMaterial);
+		}
+		Segment->SetStartScale(SectionScale, false);
+		Segment->SetEndScale(SectionScale, false);
+		Segment->RegisterComponent();
+		SegmentMeshes.Add(Segment);
+	}
+}
+
+void ABox3DRopeActor::ApplyPointsToSkin(const TArray<FVector>& WorldPoints)
+{
+	if (Spline == nullptr || WorldPoints.Num() < 2)
+	{
+		return;
+	}
+	const FTransform ToLocal = GetActorTransform();
+	TArray<FVector> LocalPoints;
+	LocalPoints.Reserve(WorldPoints.Num());
+	for (const FVector& Point : WorldPoints)
+	{
+		LocalPoints.Add(ToLocal.InverseTransformPosition(Point));
+	}
+	Spline->SetSplinePoints(LocalPoints, ESplineCoordinateSpace::Local, true);
+
+	for (int32 Index = 0; Index < SegmentMeshes.Num() && Index + 1 < LocalPoints.Num(); ++Index)
+	{
+		SegmentMeshes[Index]->SetStartAndEnd(
+			Spline->GetLocationAtSplinePoint(Index, ESplineCoordinateSpace::Local),
+			Spline->GetTangentAtSplinePoint(Index, ESplineCoordinateSpace::Local),
+			Spline->GetLocationAtSplinePoint(Index + 1, ESplineCoordinateSpace::Local),
+			Spline->GetTangentAtSplinePoint(Index + 1, ESplineCoordinateSpace::Local),
+			true);
+	}
 }
 
 void ABox3DRopeActor::BuildRope()
@@ -114,14 +205,16 @@ void ABox3DRopeActor::BuildRope()
 		Bodies.Add(BodyId);
 	}
 
-	const auto MakeLink = [WorldId](b3BodyId BodyA, b3BodyId BodyB, const FVector& LocalA, const FVector& LocalB)
+	int32 NextLinkIndex = 0;
+	const auto MakeLink = [WorldId, this, &NextLinkIndex](
+		b3BodyId BodyA, b3BodyId BodyB, const FVector& LocalA, const FVector& LocalB)
 	{
 		b3SphericalJointDef Def = b3DefaultSphericalJointDef();
 		Def.base.bodyIdA = BodyA;
 		Def.base.bodyIdB = BodyB;
 		Def.base.localFrameA = b3Transform{ Box3D::ToB3(LocalA), Box3D::IdentityQuat };
 		Def.base.localFrameB = b3Transform{ Box3D::ToB3(LocalB), Box3D::IdentityQuat };
-		b3CreateSphericalJoint(WorldId, &Def);
+		LinkJoints.Add({ b3CreateSphericalJoint(WorldId, &Def), NextLinkIndex++ });
 	};
 
 	// Anchor sits exactly at the rope start; link the first segment's top tip to it.
@@ -150,29 +243,9 @@ void ABox3DRopeActor::BuildRope()
 	}
 	LastStep = Subsystem->GetStepCount();
 	bAllAsleep = false;
+	bChainBroken = false;
 
-	// Visual skin: one spline mesh per segment, refit to the chain every frame.
-	const float MeshRadius = RopeMesh ? FMath::Max<float>(RopeMesh->GetBounds().BoxExtent.X, 1.0f) : 50.0f;
-	const FVector2D SectionScale(RopeRadius / MeshRadius);
-	SegmentMeshes.Reserve(Count);
-	for (int32 Index = 0; Index < Count; ++Index)
-	{
-		USplineMeshComponent* Segment = NewObject<USplineMeshComponent>(this);
-		Segment->SetMobility(EComponentMobility::Movable);
-		Segment->SetupAttachment(GetRootComponent());
-		Segment->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		Segment->SetCastShadow(bCastShadow);
-		Segment->SetForwardAxis(RopeMeshAxis, false);
-		Segment->SetStaticMesh(RopeMesh);
-		if (RopeMaterial != nullptr)
-		{
-			Segment->SetMaterial(0, RopeMaterial);
-		}
-		Segment->SetStartScale(SectionScale, false);
-		Segment->SetEndScale(SectionScale, false);
-		Segment->RegisterComponent();
-		SegmentMeshes.Add(Segment);
-	}
+	BuildSkin();
 	UpdateRopeVisual();
 }
 
@@ -194,13 +267,59 @@ void ABox3DRopeActor::DestroyRope()
 		b3DestroyBody(EndPinBodyId);
 	}
 	EndPinBodyId = b3BodyId{};
+	LinkJoints.Empty();
+	bChainBroken = false;
 	Interp.Empty();
 }
 
 void ABox3DRopeActor::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	PollLinkBreaks();
 	UpdateRopeVisual();
+}
+
+void ABox3DRopeActor::PollLinkBreaks()
+{
+	if (LinkBreakForce <= 0.0f || LinkJoints.Num() == 0)
+	{
+		return;
+	}
+	for (int32 Index = LinkJoints.Num() - 1; Index >= 0; --Index)
+	{
+		const FRopeLink& Link = LinkJoints[Index];
+		if (!b3Joint_IsValid(Link.Joint))
+		{
+			LinkJoints.RemoveAtSwap(Index);
+			continue;
+		}
+		if (Box3D::ToUEDir(b3Joint_GetConstraintForce(Link.Joint)).Size() > LinkBreakForce)
+		{
+			const int32 CutIndex = Link.Index;
+			b3DestroyJoint(Link.Joint, /*wakeAttached*/ true);
+			LinkJoints.RemoveAtSwap(Index);
+			bChainBroken = true;
+			OnRopeCut.Broadcast(CutIndex);
+		}
+	}
+}
+
+void ABox3DRopeActor::CutLink(int32 LinkIndex)
+{
+	for (int32 Index = 0; Index < LinkJoints.Num(); ++Index)
+	{
+		if (LinkJoints[Index].Index == LinkIndex)
+		{
+			if (b3Joint_IsValid(LinkJoints[Index].Joint))
+			{
+				b3DestroyJoint(LinkJoints[Index].Joint, /*wakeAttached*/ true);
+			}
+			LinkJoints.RemoveAtSwap(Index);
+			bChainBroken = true;
+			OnRopeCut.Broadcast(LinkIndex);
+			return;
+		}
+	}
 }
 
 void ABox3DRopeActor::UpdateRopeVisual()
@@ -250,43 +369,41 @@ void ABox3DRopeActor::UpdateRopeVisual()
 		Rotations[Index] = FQuat::Slerp(Segment.Q0, Segment.Q1, Alpha);
 	}
 
+	if (bChainBroken)
+	{
+		// A cut chain is no longer one polyline: skin each segment straight
+		// between its own capsule tips so severed ends separate visibly.
+		const FTransform ToLocal = GetActorTransform();
+		for (int32 Index = 0; Index < SegmentMeshes.Num() && Index < Count; ++Index)
+		{
+			const FVector TipUp = ToLocal.InverseTransformPosition(
+				Positions[Index] + Rotations[Index].RotateVector(FVector(0.0, 0.0, -HalfLen)));
+			const FVector TipDown = ToLocal.InverseTransformPosition(
+				Positions[Index] + Rotations[Index].RotateVector(FVector(0.0, 0.0, +HalfLen)));
+			SegmentMeshes[Index]->SetStartAndEnd(TipUp, TipDown - TipUp, TipDown, TipDown - TipUp, true);
+		}
+		return;
+	}
+
 	// Control points: segment tips, averaged where two links meet so tiny solver
 	// separation never shows as a kink.
-	TArray<FVector, TInlineAllocator<66>> Points;
-	Points.SetNum(Count + 1);
-	Points[0] = Positions[0] + Rotations[0].RotateVector(FVector(0.0, 0.0, -HalfLen));
+	TArray<FVector> Points;
+	Points.Reserve(Count + 1);
+	Points.Add(Positions[0] + Rotations[0].RotateVector(FVector(0.0, 0.0, -HalfLen)));
 	for (int32 Index = 0; Index < Count; ++Index)
 	{
 		const FVector TipDown = Positions[Index] + Rotations[Index].RotateVector(FVector(0.0, 0.0, +HalfLen));
 		if (Index + 1 < Count)
 		{
 			const FVector TipUp = Positions[Index + 1] + Rotations[Index + 1].RotateVector(FVector(0.0, 0.0, -HalfLen));
-			Points[Index + 1] = (TipDown + TipUp) * 0.5;
+			Points.Add((TipDown + TipUp) * 0.5);
 		}
 		else
 		{
-			Points[Count] = TipDown;
+			Points.Add(TipDown);
 		}
 	}
-
-	const FTransform ToLocal = GetActorTransform();
-	TArray<FVector> LocalPoints;
-	LocalPoints.Reserve(Points.Num());
-	for (const FVector& Point : Points)
-	{
-		LocalPoints.Add(ToLocal.InverseTransformPosition(Point));
-	}
-	Spline->SetSplinePoints(LocalPoints, ESplineCoordinateSpace::Local, true);
-
-	for (int32 Index = 0; Index < SegmentMeshes.Num() && Index + 1 < LocalPoints.Num(); ++Index)
-	{
-		SegmentMeshes[Index]->SetStartAndEnd(
-			Spline->GetLocationAtSplinePoint(Index, ESplineCoordinateSpace::Local),
-			Spline->GetTangentAtSplinePoint(Index, ESplineCoordinateSpace::Local),
-			Spline->GetLocationAtSplinePoint(Index + 1, ESplineCoordinateSpace::Local),
-			Spline->GetTangentAtSplinePoint(Index + 1, ESplineCoordinateSpace::Local),
-			true);
-	}
+	ApplyPointsToSkin(Points);
 }
 
 FVector ABox3DRopeActor::GetEndLocation() const

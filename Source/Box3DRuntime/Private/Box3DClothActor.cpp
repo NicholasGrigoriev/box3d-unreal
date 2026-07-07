@@ -40,6 +40,17 @@ ABox3DClothActor::ABox3DClothActor()
 	ClothMaterial = MaterialFinder.Object;
 }
 
+void ABox3DClothActor::OnConstruction(const FTransform& Transform)
+{
+	Super::OnConstruction(Transform);
+	// Editor preview: the flat sheet with its material, no physics. In game,
+	// BuildCloth rebuilds the skin itself right before the lattice.
+	if (!HasActorBegunPlay())
+	{
+		BuildSkin();
+	}
+}
+
 void ABox3DClothActor::BeginPlay()
 {
 	Super::BeginPlay();
@@ -50,6 +61,77 @@ void ABox3DClothActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	DestroyCloth();
 	Super::EndPlay(EndPlayReason);
+}
+
+void ABox3DClothActor::BuildSkin()
+{
+	GridRows = FMath::Clamp(Rows, 2, 40);
+	GridColumns = FMath::Clamp(Columns, 2, 40);
+	GridSpacingX = FMath::Max(Width, 20.0f) / (GridColumns - 1);
+	GridSpacingZ = FMath::Max(Height, 20.0f) / (GridRows - 1);
+	GridHalfWidth = 0.5f * FMath::Max(Width, 20.0f);
+	const int32 VertexCount = GridRows * GridColumns;
+
+	// Winding puts the front face on local -Y; the per-frame normals match.
+	VertexBuffer.SetNum(VertexCount);
+	NormalBuffer.SetNum(VertexCount);
+	BackNormalBuffer.SetNum(VertexCount);
+	TArray<FVector2D> UVs;
+	UVs.Reserve(VertexCount);
+	for (int32 Row = 0; Row < GridRows; ++Row)
+	{
+		for (int32 Column = 0; Column < GridColumns; ++Column)
+		{
+			const int32 Index = ParticleIndex(Row, Column);
+			VertexBuffer[Index] = LocalGridPosition(Row, Column);
+			NormalBuffer[Index] = FVector(0.0, -1.0, 0.0);
+			BackNormalBuffer[Index] = FVector(0.0, 1.0, 0.0);
+			UVs.Emplace(Column / static_cast<float>(GridColumns - 1), Row / static_cast<float>(GridRows - 1));
+		}
+	}
+
+	Triangles.Reset();
+	BackTriangles.Reset();
+	Triangles.Reserve((GridRows - 1) * (GridColumns - 1) * 6);
+	BackTriangles.Reserve(Triangles.Max());
+	for (int32 Row = 0; Row + 1 < GridRows; ++Row)
+	{
+		for (int32 Column = 0; Column + 1 < GridColumns; ++Column)
+		{
+			const int32 I00 = ParticleIndex(Row, Column);
+			const int32 I01 = ParticleIndex(Row, Column + 1);
+			const int32 I10 = ParticleIndex(Row + 1, Column);
+			const int32 I11 = ParticleIndex(Row + 1, Column + 1);
+			Triangles.Append({ I00, I01, I11 });
+			Triangles.Append({ I00, I11, I10 });
+			BackTriangles.Append({ I00, I11, I01 });
+			BackTriangles.Append({ I00, I10, I11 });
+		}
+	}
+
+	ClothMesh->ClearAllMeshSections();
+	ClothMesh->CreateMeshSection_LinearColor(0, VertexBuffer, Triangles, NormalBuffer, UVs,
+		TArray<FLinearColor>(), TArray<FProcMeshTangent>(), /*bCreateCollision*/ false);
+	if (bDoubleSided)
+	{
+		ClothMesh->CreateMeshSection_LinearColor(1, VertexBuffer, BackTriangles, BackNormalBuffer, UVs,
+			TArray<FLinearColor>(), TArray<FProcMeshTangent>(), /*bCreateCollision*/ false);
+	}
+	SetClothMaterial(ClothMaterial);
+	ClothMesh->SetCastShadow(bCastShadow);
+}
+
+void ABox3DClothActor::SetClothMaterial(UMaterialInterface* Material)
+{
+	ClothMaterial = Material;
+	if (ClothMesh != nullptr)
+	{
+		ClothMesh->SetMaterial(0, Material);
+		if (bDoubleSided)
+		{
+			ClothMesh->SetMaterial(1, Material);
+		}
+	}
 }
 
 void ABox3DClothActor::BuildCloth()
@@ -66,22 +148,13 @@ void ABox3DClothActor::BuildCloth()
 	}
 	const b3WorldId WorldId = Subsystem->GetBox3DWorldId();
 
-	GridRows = FMath::Clamp(Rows, 2, 40);
-	GridColumns = FMath::Clamp(Columns, 2, 40);
-	const float SpacingX = FMath::Max(Width, 20.0f) / (GridColumns - 1);
-	const float SpacingZ = FMath::Max(Height, 20.0f) / (GridRows - 1);
+	BuildSkin();
+
 	// Small enough that resting neighbors never touch; large enough that the
 	// sheet still catches on props and pawns.
-	const float ParticleRadius = 0.35f * FMath::Min(SpacingX, SpacingZ);
-	const float HalfWidth = 0.5f * FMath::Max(Width, 20.0f);
-
+	const float ParticleRadius = 0.35f * FMath::Min(GridSpacingX, GridSpacingZ);
 	const FTransform ActorTransform = GetActorTransform();
 	const int32 SelfGroup = Box3D::AllocateSelfCollisionGroup();
-
-	const auto LocalGridPosition = [&](int32 Row, int32 Column)
-	{
-		return FVector(Column * SpacingX - HalfWidth, 0.0, -Row * SpacingZ);
-	};
 
 	Bodies.Reserve(GridRows * GridColumns);
 	for (int32 Row = 0; Row < GridRows; ++Row)
@@ -135,7 +208,7 @@ void ABox3DClothActor::BuildCloth()
 		b3CreateDistanceJoint(WorldId, &Def);
 	};
 
-	const float DiagonalLength = FMath::Sqrt(SpacingX * SpacingX + SpacingZ * SpacingZ);
+	const float DiagonalLength = FMath::Sqrt(GridSpacingX * GridSpacingX + GridSpacingZ * GridSpacingZ);
 	for (int32 Row = 0; Row < GridRows; ++Row)
 	{
 		for (int32 Column = 0; Column < GridColumns; ++Column)
@@ -145,11 +218,11 @@ void ABox3DClothActor::BuildCloth()
 			// nothing constrains the angle between neighboring links.
 			if (Column + 1 < GridColumns)
 			{
-				MakeStitch(Here, Bodies[ParticleIndex(Row, Column + 1)], SpacingX, false, 0.0f, 0.0f);
+				MakeStitch(Here, Bodies[ParticleIndex(Row, Column + 1)], GridSpacingX, false, 0.0f, 0.0f);
 			}
 			if (Row + 1 < GridRows)
 			{
-				MakeStitch(Here, Bodies[ParticleIndex(Row + 1, Column)], SpacingZ, false, 0.0f, 0.0f);
+				MakeStitch(Here, Bodies[ParticleIndex(Row + 1, Column)], GridSpacingZ, false, 0.0f, 0.0f);
 			}
 			if (bShearConstraints && Row + 1 < GridRows && Column + 1 < GridColumns)
 			{
@@ -195,42 +268,6 @@ void ABox3DClothActor::BuildCloth()
 	}
 	LastStep = Subsystem->GetStepCount();
 	bAllAsleep = false;
-
-	// Visual skin: one grid mesh section, re-skinned to the particles per frame.
-	// Winding puts the front face on local -Y (per-frame normals match).
-	VertexBuffer.SetNum(Bodies.Num());
-	NormalBuffer.SetNum(Bodies.Num());
-	TArray<FVector2D> UVs;
-	UVs.Reserve(Bodies.Num());
-	for (int32 Row = 0; Row < GridRows; ++Row)
-	{
-		for (int32 Column = 0; Column < GridColumns; ++Column)
-		{
-			VertexBuffer[ParticleIndex(Row, Column)] = LocalGridPosition(Row, Column);
-			NormalBuffer[ParticleIndex(Row, Column)] = FVector(0.0, -1.0, 0.0);
-			UVs.Emplace(Column / static_cast<float>(GridColumns - 1), Row / static_cast<float>(GridRows - 1));
-		}
-	}
-	Triangles.Reserve((GridRows - 1) * (GridColumns - 1) * 6);
-	for (int32 Row = 0; Row + 1 < GridRows; ++Row)
-	{
-		for (int32 Column = 0; Column + 1 < GridColumns; ++Column)
-		{
-			const int32 I00 = ParticleIndex(Row, Column);
-			const int32 I01 = ParticleIndex(Row, Column + 1);
-			const int32 I10 = ParticleIndex(Row + 1, Column);
-			const int32 I11 = ParticleIndex(Row + 1, Column + 1);
-			Triangles.Append({ I00, I01, I11 });
-			Triangles.Append({ I00, I11, I10 });
-		}
-	}
-	ClothMesh->CreateMeshSection_LinearColor(0, VertexBuffer, Triangles, NormalBuffer, UVs,
-		TArray<FLinearColor>(), TArray<FProcMeshTangent>(), /*bCreateCollision*/ false);
-	if (ClothMaterial != nullptr)
-	{
-		ClothMesh->SetMaterial(0, ClothMaterial);
-	}
-	ClothMesh->SetCastShadow(bCastShadow);
 }
 
 void ABox3DClothActor::DestroyCloth()
@@ -293,7 +330,7 @@ void ABox3DClothActor::UpdateClothVisual()
 	}
 
 	// Area-weighted vertex normals. UE front faces satisfy N = (C-A) x (B-A)
-	// for triangle (A, B, C), matching the winding chosen in BuildCloth.
+	// for triangle (A, B, C), matching the winding chosen in BuildSkin.
 	FMemory::Memzero(NormalBuffer.GetData(), NormalBuffer.Num() * sizeof(FVector));
 	for (int32 Index = 0; Index + 2 < Triangles.Num(); Index += 3)
 	{
@@ -312,11 +349,20 @@ void ABox3DClothActor::UpdateClothVisual()
 
 	ClothMesh->UpdateMeshSection_LinearColor(0, VertexBuffer, NormalBuffer,
 		TArray<FVector2D>(), TArray<FLinearColor>(), TArray<FProcMeshTangent>());
+	if (bDoubleSided)
+	{
+		for (int32 Index = 0; Index < NormalBuffer.Num(); ++Index)
+		{
+			BackNormalBuffer[Index] = -NormalBuffer[Index];
+		}
+		ClothMesh->UpdateMeshSection_LinearColor(1, VertexBuffer, BackNormalBuffer,
+			TArray<FVector2D>(), TArray<FLinearColor>(), TArray<FProcMeshTangent>());
+	}
 }
 
 FVector ABox3DClothActor::GetParticleLocation(int32 Row, int32 Column) const
 {
-	if (Row < 0 || Row >= GridRows || Column < 0 || Column >= GridColumns)
+	if (Row < 0 || Row >= GridRows || Column < 0 || Column >= GridColumns || Bodies.Num() == 0)
 	{
 		return GetActorLocation();
 	}

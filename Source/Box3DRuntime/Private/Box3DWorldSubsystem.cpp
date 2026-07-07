@@ -158,6 +158,7 @@ void UBox3DWorldSubsystem::Tick(float DeltaTime)
 	while (Accumulator >= FixedDt)
 	{
 		PushKinematicTargets(FixedDt);
+		OnPreStep.Broadcast(FixedDt);
 		StepFixed(FixedDt, Settings->SubStepCount);
 		// Events are buffered for the last step only, so a begin/end pair split
 		// across two steps of the same tick would vanish if pumped once per tick.

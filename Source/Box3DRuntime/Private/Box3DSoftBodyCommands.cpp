@@ -1,12 +1,19 @@
-// Console hooks for the rope/cloth soft-body actors:
-//   box3d.SpawnRope [Length=400] [Segments=20]  hang a rope from the surface
-//                                               under the crosshair
-//   box3d.SpawnCloth [Width=200] [Height=200]   hang a cloth sheet there,
-//                                               facing the player
+// Console hooks for the special-actor zoo:
+//   box3d.SpawnRope [Length=400] [Segments=20]   hang a rope from the surface
+//                                                under the crosshair
+//   box3d.SpawnCloth [Width=200] [Height=200]    hang a cloth sheet there,
+//                                                facing the player
+//   box3d.SpawnBreakable [Cols=4] [Layers=3]     welded cube wall at the
+//                                                crosshair — shoot it apart
+//   box3d.SpawnWind [mode=directional] [Speed]   wind source at the crosshair
+//                                                (directional|turbulence|vortex)
 
+#include "Box3DBreakableActor.h"
 #include "Box3DClothActor.h"
 #include "Box3DRopeActor.h"
 #include "Box3DRuntime.h"
+#include "Box3DWindActor.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
@@ -85,6 +92,88 @@ static FAutoConsoleCommandWithWorldAndArgs GBox3DSpawnClothCommand(
 		Cloth->FinishSpawning(Transform);
 		UE_LOG(LogBox3D, Log, TEXT("box3d.SpawnCloth: %.0fx%.0f cm, %d particles at %s"),
 			Cloth->Width, Cloth->Height, Cloth->GetParticleCount(), *SpawnPoint.ToCompactString());
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GBox3DSpawnBreakableCommand(
+	TEXT("box3d.SpawnBreakable"),
+	TEXT("Build a welded wall of cube chunks at the point under the crosshair. Usage: box3d.SpawnBreakable [Cols=4] [Layers=3]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		FVector SpawnPoint;
+		FRotator ViewRotation;
+		if (World == nullptr || !GetSpawnPoint(World, SpawnPoint, ViewRotation))
+		{
+			return;
+		}
+		UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+		if (CubeMesh == nullptr)
+		{
+			return;
+		}
+
+		const int32 Cols = FMath::Clamp(Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 4, 1, 10);
+		const int32 Layers = FMath::Clamp(Args.Num() > 1 ? FCString::Atoi(*Args[1]) : 3, 1, 10);
+		constexpr float ChunkSize = 40.0f; // engine cube (100 cm) at 0.4 scale
+
+		// Wall faces the player: chunks spread along the view-right axis.
+		const FTransform Transform(FRotator(0.0, ViewRotation.Yaw + 90.0, 0.0), SpawnPoint);
+		ABox3DBreakableActor* Breakable = World->SpawnActorDeferred<ABox3DBreakableActor>(
+			ABox3DBreakableActor::StaticClass(), Transform);
+		if (Breakable == nullptr)
+		{
+			return;
+		}
+		for (int32 Layer = 0; Layer < Layers; ++Layer)
+		{
+			for (int32 Col = 0; Col < Cols; ++Col)
+			{
+				const FVector Local(
+					(Col - 0.5f * (Cols - 1)) * ChunkSize, 0.0,
+					Layer * ChunkSize + 0.5f * ChunkSize);
+				Breakable->AddChunk(CubeMesh, FTransform(FQuat::Identity, Local, FVector(0.4)));
+			}
+		}
+		Breakable->FinishSpawning(Transform);
+		UE_LOG(LogBox3D, Log, TEXT("box3d.SpawnBreakable: %d chunks, %d welds at %s"),
+			Breakable->GetChunkCount(), Breakable->GetLiveWeldCount(), *SpawnPoint.ToCompactString());
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GBox3DSpawnWindCommand(
+	TEXT("box3d.SpawnWind"),
+	TEXT("Drop a Box3D wind source at the point under the crosshair, blowing away from you. Usage: box3d.SpawnWind [directional|turbulence|vortex] [Speed=800]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		FVector SpawnPoint;
+		FRotator ViewRotation;
+		if (World == nullptr || !GetSpawnPoint(World, SpawnPoint, ViewRotation))
+		{
+			return;
+		}
+
+		EBox3DWindMode Mode = EBox3DWindMode::Directional;
+		if (Args.Num() > 0)
+		{
+			if (Args[0].Equals(TEXT("turbulence"), ESearchCase::IgnoreCase))
+			{
+				Mode = EBox3DWindMode::Turbulence;
+			}
+			else if (Args[0].Equals(TEXT("vortex"), ESearchCase::IgnoreCase))
+			{
+				Mode = EBox3DWindMode::Vortex;
+			}
+		}
+
+		const FTransform Transform(FRotator(0.0, ViewRotation.Yaw, 0.0), SpawnPoint);
+		ABox3DWindActor* Wind = World->SpawnActorDeferred<ABox3DWindActor>(ABox3DWindActor::StaticClass(), Transform);
+		if (Wind == nullptr)
+		{
+			return;
+		}
+		Wind->WindMode = Mode;
+		Wind->WindSpeed = Args.Num() > 1 ? FMath::Clamp(FCString::Atof(*Args[1]), 0.0f, 10000.0f) : 800.0f;
+		Wind->FinishSpawning(Transform);
+		UE_LOG(LogBox3D, Log, TEXT("box3d.SpawnWind: mode %d, %.0f cm/s at %s"),
+			static_cast<int32>(Mode), Wind->WindSpeed, *SpawnPoint.ToCompactString());
 	}));
 
 #endif // !UE_BUILD_SHIPPING

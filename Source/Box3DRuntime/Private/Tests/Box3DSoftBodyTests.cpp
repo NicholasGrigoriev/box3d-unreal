@@ -73,6 +73,39 @@ bool FBox3DSoftBodyRopePinnedSagsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DSoftBodyRopeCutsTest,
+	"Box3DUnreal.SoftBody.RopeCuts", BOX3D_TEST_FLAGS)
+bool FBox3DSoftBodyRopeCutsTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld TestWorld;
+
+	const FTransform Transform(FQuat::Identity, FVector(0.0, 0.0, 300.0));
+	ABox3DRopeActor* Rope = TestWorld.World->SpawnActorDeferred<ABox3DRopeActor>(
+		ABox3DRopeActor::StaticClass(), Transform);
+	Rope->RopeLength = 200.0f;
+	Rope->NumSegments = 8;
+	Rope->FinishSpawning(Transform);
+
+	TestWorld.Step(60);
+	TestEqual(TEXT("All links alive while hanging"), Rope->GetLiveLinkCount(), 8);
+	TestFalse(TEXT("Rope starts uncut"), Rope->IsCut());
+
+	// Explicit cut mid-chain: the lower half free-falls.
+	Rope->CutLink(4);
+	TestTrue(TEXT("CutLink marks the rope cut"), Rope->IsCut());
+	TestEqual(TEXT("CutLink removed one link"), Rope->GetLiveLinkCount(), 7);
+	TestWorld.Step(90);
+	TestTrue(TEXT("Severed lower half falls away"), Rope->GetEndLocation().Z < 40.0);
+
+	// Force path: with a 1 N threshold, the hanging upper chain's own weight
+	// snaps more links on the next poll.
+	Rope->LinkBreakForce = 1.0f;
+	TestWorld.Step(1);
+	Rope->PollLinkBreaks();
+	TestTrue(TEXT("Overloaded links snap via LinkBreakForce"), Rope->GetLiveLinkCount() < 7);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DSoftBodyClothDrapesTest,
 	"Box3DUnreal.SoftBody.ClothDrapes", BOX3D_TEST_FLAGS)
 bool FBox3DSoftBodyClothDrapesTest::RunTest(const FString& Parameters)
@@ -97,6 +130,11 @@ bool FBox3DSoftBodyClothDrapesTest::RunTest(const FString& Parameters)
 	if (TestNotNull(TEXT("Cloth skin section exists"), Section))
 	{
 		TestEqual(TEXT("One skin vertex per particle"), Section->ProcVertexBuffer.Num(), 36);
+	}
+	const FProcMeshSection* BackSection = Cloth->GetClothMesh()->GetProcMeshSection(1);
+	if (TestNotNull(TEXT("Double-sided cloth has a back section"), BackSection))
+	{
+		TestEqual(TEXT("Back section mirrors every vertex"), BackSection->ProcVertexBuffer.Num(), 36);
 	}
 
 	TestWorld.Step(400);

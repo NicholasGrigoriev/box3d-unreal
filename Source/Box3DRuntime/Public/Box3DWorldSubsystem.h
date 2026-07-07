@@ -13,6 +13,12 @@ class FBox3DDebugDrawer;
 class FBox3DStaticSceneMirror;
 struct b3Recording;
 
+/// Fired immediately before every fixed step (after kinematic targets are
+/// pushed). The right place to apply continuous forces — wind, buoyancy,
+/// attractors — because forces are cleared after each step, so per-frame
+/// application over- or under-doses depending on frame rate.
+DECLARE_MULTICAST_DELEGATE_OneParam(FBox3DPreStepSignature, float /*FixedDeltaTime*/);
+
 /// Snapshot of box3d's per-step profile and simulation counters, readable from
 /// Blueprint. Times describe the most recent fixed step, in milliseconds. The
 /// same data feeds `stat box3d`.
@@ -98,6 +104,9 @@ public:
 	/// interpolating raw-body visuals the way bInterpolateBodyTransforms
 	/// interpolates body components.
 	float GetFixedStepAlpha() const;
+
+	/// Broadcast before every fixed step; see FBox3DPreStepSignature.
+	FBox3DPreStepSignature OnPreStep;
 
 	/// Profile times (last fixed step) and simulation counters. Zeroed when the
 	/// physics world does not exist.

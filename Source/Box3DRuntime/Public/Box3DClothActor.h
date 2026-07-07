@@ -26,16 +26,16 @@ enum class EBox3DClothPin : uint8
 /// with rigid distance joints along warp/weft and softer spring joints across
 /// the diagonals (shear). The particles are never drawn — a procedural mesh
 /// re-skins their positions every frame, normals recomputed, interpolated
-/// between fixed steps.
+/// between fixed steps. Double-sided by default (a mirrored back section), so
+/// any material works; the flat sheet previews in the editor viewport.
 ///
 /// The cloth hangs in the actor's local X (width) / Z (height, downward) plane
 /// from a kinematic anchor, so moving the actor drags pinned cloth. Particles
 /// use the Debris channel: explosions blow the cloth around and pawn proxies
 /// push through it like a curtain.
 ///
-/// Use a Two Sided material — the sheet is single-layer geometry.
 /// Bodies and joints are built on BeginPlay; layout properties are
-/// creation-time only.
+/// creation-time only. The material can change at any time (SetClothMaterial).
 UCLASS(BlueprintType, Blueprintable, ClassGroup = (Physics))
 class BOX3DRUNTIME_API ABox3DClothActor : public AActor
 {
@@ -83,12 +83,23 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Cloth", meta = (EditCondition = "bShearConstraints", ClampMin = "0"))
 	float ShearDampingRatio = 0.5f;
 
-	/// Material for the sheet. Enable Two Sided on it, or the back face is invisible.
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rendering")
+	/// Material for the sheet. Any material works — the cloth renders a
+	/// mirrored back section, so Two Sided is not required.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering")
 	TObjectPtr<UMaterialInterface> ClothMaterial;
+
+	/// Render a mirrored back-face section so the sheet is visible from both
+	/// sides with correct lighting. Costs a second mesh-section update per
+	/// frame; turn off if the material is Two Sided anyway.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rendering")
+	bool bDoubleSided = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rendering")
 	bool bCastShadow = true;
+
+	/// Swap the sheet material at runtime (both sides).
+	UFUNCTION(BlueprintCallable, Category = "Rendering")
+	void SetClothMaterial(UMaterialInterface* Material);
 
 	/// World position of a particle (row 0 = top, column 0 = local -X edge).
 	UFUNCTION(BlueprintPure, Category = "Cloth")
@@ -104,15 +115,23 @@ public:
 	int32 GetParticleCount() const { return Bodies.Num(); }
 
 	//~ AActor
+	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
 private:
+	/// (Re)build the flat grid mesh sections and apply materials. Runs in the
+	/// editor via OnConstruction (the preview) and again from BuildCloth.
+	void BuildSkin();
 	void BuildCloth();
 	void DestroyCloth();
 	void UpdateClothVisual();
 	int32 ParticleIndex(int32 Row, int32 Column) const { return Row * GridColumns + Column; }
+	FVector LocalGridPosition(int32 Row, int32 Column) const
+	{
+		return FVector(Column * GridSpacingX - GridHalfWidth, 0.0, -Row * GridSpacingZ);
+	}
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Cloth", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UBox3DBodyComponent> AnchorBody;
@@ -123,6 +142,9 @@ private:
 	TArray<b3BodyId> Bodies;
 	int32 GridRows = 0;
 	int32 GridColumns = 0;
+	float GridSpacingX = 0.0f;
+	float GridSpacingZ = 0.0f;
+	float GridHalfWidth = 0.0f;
 
 	/// Between-step visual interpolation, positions only (rotation is locked).
 	struct FParticleInterp
@@ -137,5 +159,7 @@ private:
 	/// Reused per-frame buffers for the mesh update.
 	TArray<FVector> VertexBuffer;
 	TArray<FVector> NormalBuffer;
+	TArray<FVector> BackNormalBuffer;
 	TArray<int32> Triangles;
+	TArray<int32> BackTriangles;
 };
