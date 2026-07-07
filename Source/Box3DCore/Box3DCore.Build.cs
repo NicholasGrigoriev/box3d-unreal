@@ -21,7 +21,7 @@ public class Box3DCore : ModuleRules
 		// a PublicDefinition — UBT propagates it to every dependent module so both
 		// sides of the API always agree. Flip and rebuild; the Box3DRuntime
 		// conversion seam (Box3DConversion.h) keeps UE's LWC precision through it.
-		const bool bDoublePrecision = false;
+		bool bDoublePrecision = false;
 		if (bDoublePrecision)
 		{
 			PublicDefinitions.Add("BOX3D_DOUBLE_PRECISION=1");
