@@ -172,11 +172,14 @@ namespace
 		if (Sample != nullptr)
 		{
 			SampleZ = Sample->GetActorLocation().Z;
-			// Straight down past the prop: proves it rests on mirrored map geometry.
+			// Straight down through the prop, statics only so the prop itself (and
+			// its neighbors) don't eat the ray: proves it rests on mirrored geometry.
+			FBox3DQueryFilter StaticsOnly;
+			StaticsOnly.MaskBits = 1 << static_cast<int32>(EBox3DChannel::WorldStatic);
 			FBox3DHitResult FloorHit;
 			if (UBox3DQueryLibrary::Box3DRayCast(World,
-					Sample->GetActorLocation() + FVector(0, 0, -50.0),
-					Sample->GetActorLocation() - FVector(0, 0, 5000.0), FBox3DQueryFilter{}, FloorHit))
+					Sample->GetActorLocation() + FVector(0, 0, 100.0),
+					Sample->GetActorLocation() - FVector(0, 0, 5000.0), StaticsOnly, FloorHit))
 			{
 				FloorZ = FloorHit.Location.Z;
 			}
