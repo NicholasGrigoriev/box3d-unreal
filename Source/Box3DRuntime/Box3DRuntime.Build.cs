@@ -18,6 +18,7 @@ public class Box3DRuntime : ModuleRules
 			"Engine",
 			"DeveloperSettings",
 			"PhysicsCore",
+			"ProceduralMeshComponent",
 			"RenderCore",
 			"RHI",
 		});

@@ -94,6 +94,11 @@ public:
 	/// Number of fixed steps performed since world creation.
 	uint64 GetStepCount() const { return StepCount; }
 
+	/// Fraction [0, 1] of the way from the last fixed step to the next, for
+	/// interpolating raw-body visuals the way bInterpolateBodyTransforms
+	/// interpolates body components.
+	float GetFixedStepAlpha() const;
+
 	/// Profile times (last fixed step) and simulation counters. Zeroed when the
 	/// physics world does not exist.
 	UFUNCTION(BlueprintCallable, Category = "Box3D")

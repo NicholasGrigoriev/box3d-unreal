@@ -113,4 +113,9 @@ namespace Box3D
 
 	/// Resolve a shape hit back to the owning component/actor via body userData.
 	BOX3DRUNTIME_API UBox3DBodyComponent* ResolveComponent(b3ShapeId ShapeId);
+
+	/// A fresh negative b3Filter group index. Give one to every shape of a
+	/// multi-body assembly (rope, cloth, ragdoll) to disable self-collision while
+	/// separate assemblies still collide with each other.
+	BOX3DRUNTIME_API int32 AllocateSelfCollisionGroup();
 }

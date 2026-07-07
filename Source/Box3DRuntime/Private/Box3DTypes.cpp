@@ -24,4 +24,10 @@ namespace Box3D
 		UObject* UserData = static_cast<UObject*>(b3Body_GetUserData(BodyId));
 		return Cast<UBox3DBodyComponent>(UserData);
 	}
+
+	int32 AllocateSelfCollisionGroup()
+	{
+		static int32 Counter = 0;
+		return --Counter;
+	}
 }

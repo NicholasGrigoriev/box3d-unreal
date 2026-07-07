@@ -436,6 +436,11 @@ void UBox3DWorldSubsystem::InvalidateInterpolation(UBox3DBodyComponent* Componen
 	InterpStates.Remove(Component);
 }
 
+float UBox3DWorldSubsystem::GetFixedStepAlpha() const
+{
+	return FMath::Clamp(Accumulator / GetDefault<UBox3DSettings>()->FixedTimeStep, 0.0f, 1.0f);
+}
+
 FBox3DWorldStats UBox3DWorldSubsystem::GetWorldStats() const
 {
 	FBox3DWorldStats Stats;

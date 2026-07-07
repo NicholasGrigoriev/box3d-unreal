@@ -15,6 +15,9 @@ namespace Box3D
 	constexpr float UEToMeters = 0.01f;
 	constexpr float MetersToUE = 100.0f;
 
+	/// Identity rotation for hand-built b3 defs.
+	constexpr b3Quat IdentityQuat{ { 0.0f, 0.0f, 0.0f }, 1.0f };
+
 	/// Position/length: cm -> m. Scaled in double and narrowed once, matching the
 	/// b3Pos seam bit-for-bit in single precision.
 	inline b3Vec3 ToB3(const FVector& V)
