@@ -39,17 +39,29 @@ namespace Box3D
 		float AngularDamping = 1.0f;
 		float Friction = 0.7f;
 
-		/// Scales the UE-computed per-body masses.
+		/// Scales the per-body masses.
 		float MassScale = 1.0f;
+
+		/// Clamp every body to at least this fraction of the heaviest body's
+		/// mass. Extreme ratios (300 kg torso vs 2 kg hand) make the joint chain
+		/// jitter and never sleep. 0 disables the clamp.
+		float MinMassFraction = 0.05f;
 
 		/// Map the physics asset's cone/twist limits onto the joints. Off: free
 		/// spherical joints (position-only, floppy).
 		bool bUseConstraintLimits = true;
+
+		/// Joint constraint softness (b3JointDef advanced fields). Hertz > 0
+		/// softens position/limit corrections — the anti-jitter lever; 0 keeps
+		/// box3d's default rigidity. DampingRatio applies only when Hertz > 0.
+		float ConstraintHertz = 0.0f;
+		float ConstraintDampingRatio = 2.0f;
 	};
 
 	/// Replicate a UPhysicsAsset in the Box3D world: one dynamic body per skeletal
-	/// body setup (shapes via CreateShapesFromBodySetup, mass matched to UE's
-	/// CalculateMass) and one spherical joint per constraint template. UE's
+	/// body setup (shapes via CreateShapesFromBodySetup, mass taken from the
+	/// asset's per-body Mass (kg) override when set, else UE's CalculateMass)
+	/// and one spherical joint per constraint template. UE's
 	/// asymmetric swing pair becomes box3d's symmetric cone (the larger of the two
 	/// angles); twist maps directly. Bones missing from RefSkeleton are skipped.
 	///
@@ -108,9 +120,23 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Ragdoll", meta = (ClampMin = "0.01"))
 	float MassScale = 1.0f;
 
+	/// Clamp every body to at least this fraction of the heaviest body's mass.
+	/// Extreme mass ratios make the chain jitter and never sleep. 0 = off.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Ragdoll", meta = (ClampMin = "0", ClampMax = "1"))
+	float MinBodyMassFraction = 0.05f;
+
 	/// Map the physics asset's cone/twist limits onto the joints.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Ragdoll")
 	bool bUseConstraintLimits = true;
+
+	/// Joint softness in Hertz: > 0 softens limit corrections (anti-jitter);
+	/// 0 keeps box3d's default rigidity.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Ragdoll", meta = (ClampMin = "0"))
+	float ConstraintHertz = 0.0f;
+
+	/// Damping for ConstraintHertz. 1 = critical, higher = calmer.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Ragdoll", meta = (ClampMin = "0"))
+	float ConstraintDampingRatio = 2.0f;
 
 	/// Build the ragdoll from the mesh's physics asset at its current pose and
 	/// take over the mesh's animation. Every body starts with InitialVelocity

@@ -39,15 +39,17 @@ bool FBox3DRagdollBuildTest::RunTest(const FString& Parameters)
 	}
 
 	UPhysicsAsset* PhysAsset = NewObject<UPhysicsAsset>(GetTransientPackage());
-	auto AddBody = [PhysAsset](const FName BoneName)
+	auto AddBody = [PhysAsset](const FName BoneName) -> USkeletalBodySetup*
 	{
 		USkeletalBodySetup* Setup = NewObject<USkeletalBodySetup>(PhysAsset);
 		Setup->BoneName = BoneName;
 		Setup->AggGeom.SphylElems.Add(FKSphylElem(10.0f, 30.0f));
 		PhysAsset->SkeletalBodySetups.Add(Setup);
+		return Setup;
 	};
 	AddBody(TEXT("spine"));
-	AddBody(TEXT("head"));
+	// Asset-authored Mass (kg) override — the way real assets tune ragdoll weight.
+	AddBody(TEXT("head"))->DefaultInstance.SetMassOverride(200.0f, true);
 	AddBody(TEXT("missing_bone")); // must be skipped, not crash
 
 	UPhysicsConstraintTemplate* Constraint = NewObject<UPhysicsConstraintTemplate>(PhysAsset);
@@ -80,13 +82,15 @@ bool FBox3DRagdollBuildTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	for (const Box3D::FRagdollBone& Bone : Bones)
-	{
-		TestTrue(TEXT("body valid"), b3Body_IsValid(Bone.BodyId));
-		// r=10 cm, l=30 cm sphyl at default physical-material density ~= 13.6 kg.
-		const float Mass = b3Body_GetMass(Bone.BodyId);
-		TestTrue(FString::Printf(TEXT("UE-matched mass plausible (%f kg)"), Mass), Mass > 1.0f && Mass < 100.0f);
-	}
+	// Bones come back in physics-asset order: spine (slot 0), head (slot 1).
+	TestTrue(TEXT("bodies valid"), b3Body_IsValid(Bones[0].BodyId) && b3Body_IsValid(Bones[1].BodyId));
+	TestEqual(TEXT("head inherits the asset's Mass (kg) override"),
+		b3Body_GetMass(Bones[1].BodyId), 200.0f, 0.5f);
+	// UE's power-curve mass for the small sphyl lands under the 5% ratio clamp
+	// (200 kg * 0.05 = 10 kg), so the spine must be lifted exactly to it.
+	const float SpineMass = b3Body_GetMass(Bones[0].BodyId);
+	TestTrue(FString::Printf(TEXT("spine ratio-clamped to >= 5%% of heaviest (%f kg)"), SpineMass),
+		SpineMass >= 200.0f * Params.MinMassFraction - 0.01f && SpineMass < 100.0f);
 	TestTrue(TEXT("joint valid"), b3Joint_IsValid(Joints[0]));
 
 	const float StartZ0 = BodyLocation(Bones[0]).Z;
@@ -117,11 +121,10 @@ bool FBox3DGroundWeightTest::RunTest(const FString& Parameters)
 			Body.GravityScale = 0.0f;
 		});
 	};
-	const auto SpawnPawn = [&Test](float X, float WeightKg)
+	const auto SpawnPawn = [&Test](float X, float WeightKg, float GapCm)
 	{
-		// Capsule bottom 5 cm above the plank top: the probe (bottom + slack)
-		// must bridge the gap while contact itself never pushes.
-		return Box3DTest::SpawnBody(Test.World, FVector(X, 0, 150 + 90 + 5), [WeightKg](UBox3DBodyComponent& Body)
+		// The probe (bottom + slack) must bridge GapCm above the plank top.
+		return Box3DTest::SpawnBody(Test.World, FVector(X, 0, 150 + 90 + GapCm), [WeightKg](UBox3DBodyComponent& Body)
 		{
 			Body.BodyType = EBox3DBodyType::Kinematic;
 			Body.ShapeType = EBox3DShapeType::Capsule;
@@ -134,16 +137,23 @@ bool FBox3DGroundWeightTest::RunTest(const FString& Parameters)
 	};
 
 	UBox3DBodyComponent* Plank = SpawnPlank(0.0f);
-	SpawnPawn(0.0f, 80.0f);
+	SpawnPawn(0.0f, 80.0f, 5.0f);
 
 	UBox3DBodyComponent* ControlPlank = SpawnPlank(500.0f);
-	SpawnPawn(500.0f, 0.0f);
+	SpawnPawn(500.0f, 0.0f, 5.0f);
+
+	// The real standing case: capsule bottom exactly touching the plank top —
+	// the contact with the infinite-mass kinematic must not eat the weight force.
+	UBox3DBodyComponent* TouchedPlank = SpawnPlank(1000.0f);
+	SpawnPawn(1000.0f, 80.0f, 0.0f);
 
 	Test.Step(10);
 
 	TestTrue(FString::Printf(TEXT("weighted pawn presses its plank down (vz=%f)"), Plank->GetLinearVelocity().Z),
 		Plank->GetLinearVelocity().Z < -1.0f);
 	TestEqual(TEXT("weightless pawn leaves its plank alone"), ControlPlank->GetLinearVelocity().Z, 0.0, 0.01);
+	TestTrue(FString::Printf(TEXT("weight still presses through standing contact (vz=%f)"), TouchedPlank->GetLinearVelocity().Z),
+		TouchedPlank->GetLinearVelocity().Z < -1.0f);
 
 	// Weight stops when the body is disabled (dead pawns must not keep pressing).
 	Plank->SetLinearVelocity(FVector::ZeroVector);

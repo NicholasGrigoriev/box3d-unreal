@@ -6,6 +6,7 @@
 #include "Box3DWorldSubsystem.h"
 #include "Animation/AnimNodeBase.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "DrawDebugHelpers.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/World.h"
 #include "PhysicsEngine/ConstraintInstance.h"
@@ -15,11 +16,23 @@
 #include "ReferenceSkeleton.h"
 #include "box3d/box3d.h"
 
+static TAutoConsoleVariable<bool> CVarBox3DDebugRagdoll(
+	TEXT("box3d.DebugRagdoll"), false,
+	TEXT("Draw ragdoll bodies with bone names, per-body masses and joint links."));
+
 namespace
 {
 	// Unity builds merge anonymous namespaces across the module's cpps, so this
 	// cannot share UBox3DBodyComponent.cpp's ForceScale name.
 	constexpr float RagdollImpulseScale = 0.01f; // kg*cm/s -> kg*m/s
+
+	void ScaleMassData(b3MassData& MassData, float Factor)
+	{
+		MassData.mass *= Factor;
+		MassData.inertia.cx = b3Vec3{ MassData.inertia.cx.x * Factor, MassData.inertia.cx.y * Factor, MassData.inertia.cx.z * Factor };
+		MassData.inertia.cy = b3Vec3{ MassData.inertia.cy.x * Factor, MassData.inertia.cy.y * Factor, MassData.inertia.cy.z * Factor };
+		MassData.inertia.cz = b3Vec3{ MassData.inertia.cz.x * Factor, MassData.inertia.cz.y * Factor, MassData.inertia.cz.z * Factor };
+	}
 
 	/// UE constraint frames put the twist axis on X; box3d puts cone and twist on
 	/// the frame Z. Cyclic re-basis (Xb3=Yue, Yb3=Zue, Zb3=Xue) keeps handedness.
@@ -96,18 +109,24 @@ int32 Box3D::BuildRagdoll(b3WorldId WorldId, const FReferenceSkeleton& RefSkelet
 		}
 
 		// Keep box3d's volume-derived inertia shape and center of mass, but match
-		// the mass UE would give this body so impulse tuning carries over.
-		const float UEMass = BodySetup->CalculateMass(MassContext) * Params.MassScale;
+		// the mass the asset authors: the per-body Mass (kg) override on the
+		// setup's DefaultInstance wins. CalculateMass(Component) can NOT be
+		// trusted for overrides — on a mesh without live per-bone physics
+		// instances (query-only corpses) it silently falls back to the
+		// component's body instance and computes volume * density.
+		const FBodyInstance& AssetInstance = BodySetup->DefaultInstance;
+		const float UEMass = (AssetInstance.bOverrideMass
+			? AssetInstance.GetMassOverride()
+			: BodySetup->CalculateMass(MassContext)) * Params.MassScale;
 		b3MassData MassData = b3Body_GetMassData(BodyId);
 		if (UEMass > UE_KINDA_SMALL_NUMBER && MassData.mass > UE_KINDA_SMALL_NUMBER)
 		{
-			const float Factor = UEMass / MassData.mass;
-			MassData.mass = UEMass;
-			MassData.inertia.cx = b3Vec3{ MassData.inertia.cx.x * Factor, MassData.inertia.cx.y * Factor, MassData.inertia.cx.z * Factor };
-			MassData.inertia.cy = b3Vec3{ MassData.inertia.cy.x * Factor, MassData.inertia.cy.y * Factor, MassData.inertia.cy.z * Factor };
-			MassData.inertia.cz = b3Vec3{ MassData.inertia.cz.x * Factor, MassData.inertia.cz.y * Factor, MassData.inertia.cz.z * Factor };
+			ScaleMassData(MassData, UEMass / MassData.mass);
 			b3Body_SetMassData(BodyId, MassData);
 		}
+		UE_LOG(LogBox3D, Verbose, TEXT("Ragdoll body %s: %.1f kg (%s)"),
+			*BodySetup->BoneName.ToString(), b3Body_GetMass(BodyId),
+			AssetInstance.bOverrideMass ? TEXT("asset override") : TEXT("computed"));
 
 		BoneNameToSlot.Add(BodySetup->BoneName, OutBones.Num());
 		FRagdollBone& Bone = OutBones.AddDefaulted_GetRef();
@@ -115,6 +134,28 @@ int32 Box3D::BuildRagdoll(b3WorldId WorldId, const FReferenceSkeleton& RefSkelet
 		Bone.BodyId = BodyId;
 		Bone.P0 = Bone.P1 = BoneWorld.GetLocation();
 		Bone.Q0 = Bone.Q1 = BoneWorld.GetRotation();
+	}
+
+	// Rein in extreme mass ratios: a 300 kg torso against a 2 kg hand makes the
+	// solver chain jitter and never sleep. Same discipline UE recommends for
+	// asset masses, applied automatically.
+	if (Params.MinMassFraction > 0.0f)
+	{
+		float MaxMass = 0.0f;
+		for (const FRagdollBone& Bone : OutBones)
+		{
+			MaxMass = FMath::Max(MaxMass, b3Body_GetMass(Bone.BodyId));
+		}
+		const float MinMass = MaxMass * Params.MinMassFraction;
+		for (const FRagdollBone& Bone : OutBones)
+		{
+			b3MassData MassData = b3Body_GetMassData(Bone.BodyId);
+			if (MassData.mass > UE_KINDA_SMALL_NUMBER && MassData.mass < MinMass)
+			{
+				ScaleMassData(MassData, MinMass / MassData.mass);
+				b3Body_SetMassData(Bone.BodyId, MassData);
+			}
+		}
 	}
 
 	for (const UPhysicsConstraintTemplate* Template : PhysAsset.ConstraintSetup)
@@ -139,6 +180,11 @@ int32 Box3D::BuildRagdoll(b3WorldId WorldId, const FReferenceSkeleton& RefSkelet
 		Def.base.localFrameA = MakeJointFrame(CI.GetRefFrame(EConstraintFrame::Frame2), MeshScale);
 		Def.base.localFrameB = MakeJointFrame(CI.GetRefFrame(EConstraintFrame::Frame1), MeshScale);
 		Def.base.collideConnected = false;
+		if (Params.ConstraintHertz > 0.0f)
+		{
+			Def.base.constraintHertz = Params.ConstraintHertz;
+			Def.base.constraintDampingRatio = FMath::Max(Params.ConstraintDampingRatio, 0.0f);
+		}
 
 		if (Params.bUseConstraintLimits)
 		{
@@ -229,7 +275,10 @@ bool UBox3DRagdollComponent::StartRagdoll(USkeletalMeshComponent* Mesh, FVector 
 	Params.AngularDamping = AngularDamping;
 	Params.Friction = Friction;
 	Params.MassScale = MassScale;
+	Params.MinMassFraction = MinBodyMassFraction;
 	Params.bUseConstraintLimits = bUseConstraintLimits;
+	Params.ConstraintHertz = ConstraintHertz;
+	Params.ConstraintDampingRatio = ConstraintDampingRatio;
 
 	Box3D::BuildRagdoll(WorldSubsystem->GetBox3DWorldId(), RefSkeleton, *PhysAsset,
 		[Mesh](int32 BoneIndex) { return Mesh->GetBoneTransform(BoneIndex); },
@@ -258,6 +307,9 @@ bool UBox3DRagdollComponent::StartRagdoll(USkeletalMeshComponent* Mesh, FVector 
 	// (weapon traces) and the Box3D-driven pose both hang off anim updates.
 	Mesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
 	Mesh->SetAnimInstanceClass(UBox3DRagdollAnimInstance::StaticClass());
+
+	UE_LOG(LogBox3D, Log, TEXT("%s: ragdoll from %s — %d bodies, %d joints, total %.1f kg"),
+		*GetPathName(), *GetNameSafe(PhysAsset), Bones.Num(), Joints.Num(), GetTotalMass());
 	return true;
 }
 
@@ -384,6 +436,32 @@ void UBox3DRagdollComponent::BuildLocalPose(TArray<FTransform>& OutLocalPose)
 			? CS.GetRelativeTransform(ComponentSpace[ParentIndex])
 			: CS;
 	}
+
+#if ENABLE_DRAW_DEBUG
+	if (CVarBox3DDebugRagdoll.GetValueOnGameThread())
+	{
+		UWorld* World = GetWorld();
+		for (const Box3D::FRagdollBone& Bone : Bones)
+		{
+			const FVector Location = FMath::Lerp(Bone.P0, Bone.P1, Alpha);
+			DrawDebugString(World, Location + FVector(0, 0, 6),
+				FString::Printf(TEXT("%s %.1f kg"),
+					*RefSkeleton.GetBoneName(Bone.BoneIndex).ToString(),
+					b3Body_GetMass(Bone.BodyId)),
+				nullptr, b3Body_IsAwake(Bone.BodyId) ? FColor::Yellow : FColor::Cyan, 0.0f, true);
+			const int32 ParentSlot = FindBodySlotForBone(RefSkeleton.GetParentIndex(Bone.BoneIndex));
+			if (ParentSlot != INDEX_NONE)
+			{
+				DrawDebugLine(World, Location,
+					FMath::Lerp(Bones[ParentSlot].P0, Bones[ParentSlot].P1, Alpha),
+					FColor::Orange, false, 0.0f, SDPG_Foreground, 0.5f);
+			}
+		}
+		DrawDebugString(World, RootWorld.GetLocation() + FVector(0, 0, 40),
+			FString::Printf(TEXT("total %.1f kg"), GetTotalMass()),
+			nullptr, FColor::Green, 0.0f, true);
+	}
+#endif
 }
 
 int32 UBox3DRagdollComponent::FindBodySlotForBone(int32 BoneIndex) const

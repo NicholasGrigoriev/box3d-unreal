@@ -5,6 +5,7 @@
 #include "Box3DRuntime.h"
 #include "Box3DWorldSubsystem.h"
 #include "Components/PrimitiveComponent.h"
+#include "DrawDebugHelpers.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
@@ -12,6 +13,11 @@
 #include "PhysicsEngine/BodySetup.h"
 #include "box3d/box3d.h"
 #include "box3d/collision.h"
+
+static TAutoConsoleVariable<bool> CVarBox3DDebugWeight(
+	TEXT("box3d.DebugWeight"), false,
+	TEXT("Draw GroundWeightKg probes: green = pressing a dynamic body (label shows force and target mass), ")
+	TEXT("yellow = hit a non-dynamic body, red = nothing in reach."));
 
 namespace
 {
@@ -321,16 +327,51 @@ void UBox3DBodyComponent::ApplyGroundWeight(b3WorldId WorldId) const
 	QueryFilter.categoryBits = Box3D::ToB3Bits(Filter.CategoryBits);
 	QueryFilter.maskBits = Box3D::ToB3Bits(Filter.MaskBits);
 
+	const FVector Start = GetComponentLocation();
 	const FVector Translation = Down * (ShapeBottomExtentCm + GroundWeightProbeSlackCm);
 	const b3RayResult Hit = b3World_CastRayClosest(WorldId,
-		Box3D::ToB3Pos(GetComponentLocation()), Box3D::ToB3(Translation), QueryFilter);
+		Box3D::ToB3Pos(Start), Box3D::ToB3(Translation), QueryFilter);
+
+#if ENABLE_DRAW_DEBUG
+	const bool bDebug = CVarBox3DDebugWeight.GetValueOnGameThread();
+	if (bDebug && !Hit.hit)
+	{
+		// Red: nothing to press within reach — either genuinely airborne or the
+		// support is not a Box3D body / not in this body's collision mask.
+		DrawDebugLine(GetWorld(), Start, Start + Translation, FColor::Red, false, 0.0f, SDPG_Foreground, 0.5f);
+	}
+#endif
 	if (!Hit.hit)
 	{
 		return;
 	}
 
 	const b3BodyId GroundBody = b3Shape_GetBody(Hit.shapeId);
-	if (b3Body_GetType(GroundBody) != b3_dynamicBody)
+	const bool bDynamic = b3Body_GetType(GroundBody) == b3_dynamicBody;
+
+#if ENABLE_DRAW_DEBUG
+	if (bDebug)
+	{
+		const FVector HitPoint = Box3D::ToUEPos(Hit.point);
+		const FColor Color = bDynamic ? FColor::Green : FColor::Yellow;
+		DrawDebugLine(GetWorld(), Start, HitPoint, Color, false, 0.0f, SDPG_Foreground, 0.5f);
+		DrawDebugPoint(GetWorld(), HitPoint, 10.0f, Color, false, 0.0f, SDPG_Foreground);
+
+		const UBox3DBodyComponent* HitComponent = Box3D::ResolveComponent(Hit.shapeId);
+		const FString TargetName = HitComponent
+			? GetNameSafe(HitComponent->GetOwner())
+			: FString(ANSI_TO_TCHAR(b3Body_GetName(GroundBody)));
+		const float GravityMagnitude = Box3D::ToUEDir(Gravity).Size(); // m/s^2
+		DrawDebugString(GetWorld(), HitPoint + FVector(0, 0, 15),
+			bDynamic
+				? FString::Printf(TEXT("%.0f kg -> %.0f N on %s (%.0f kg)"),
+					GroundWeightKg, GroundWeightKg * GravityMagnitude, *TargetName, b3Body_GetMass(GroundBody))
+				: FString::Printf(TEXT("%s is %s - no weight applied"), *TargetName,
+					b3Body_GetType(GroundBody) == b3_staticBody ? TEXT("static") : TEXT("kinematic")),
+			nullptr, Color, 0.0f, true);
+	}
+#endif
+	if (!bDynamic)
 	{
 		return;
 	}
