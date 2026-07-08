@@ -113,6 +113,14 @@ public:
 	UPROPERTY(EditAnywhere, config, Category = "Static Scene Mirror", meta = (ClampMin = "0", EditCondition = "bMirrorStaticGeometry"))
 	float MirrorTimeBudgetMs = 0.0f;
 
+	/// Convert every placed static-mesh actor whose root simulates Chaos physics
+	/// into a Box3D prop (ABox3DPropActor) when a game world starts and when
+	/// levels stream in. "Simulate Physics" on a placed actor thereby becomes the
+	/// author's opt-in for Box3D ownership; static scenery is untouched (that is
+	/// the static mirror's job). Manual alternative: the box3d.MakeProp command.
+	UPROPERTY(EditAnywhere, config, Category = "Prop Conversion")
+	bool bConvertSimulatedActors = false;
+
 	/// Interpolate body component transforms between fixed steps for smooth motion
 	/// on displays faster than the fixed step rate. Adds up to one fixed step of
 	/// visual latency to Box3D-driven components.

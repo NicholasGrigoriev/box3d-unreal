@@ -11,6 +11,7 @@
 #include "Box3DStaticSceneMirror.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/StaticMeshActor.h"
+#include "EngineUtils.h"
 
 namespace
 {
@@ -26,6 +27,46 @@ namespace
 		Component->SetMobility(EComponentMobility::Static);
 		return Actor;
 	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DConvertSimulatedActorsTest,
+	"Box3DUnreal.Props.ConvertSimulatedActors", BOX3D_TEST_FLAGS)
+bool FBox3DConvertSimulatedActorsTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld Test;
+	UStaticMesh* Cube = Box3DTest::LoadCubeMesh();
+
+	// A Chaos-simulating board (the author's opt-in for Box3D ownership)...
+	AStaticMeshActor* Simulated = Test.World->SpawnActor<AStaticMeshActor>(
+		AStaticMeshActor::StaticClass(), FTransform(FVector(0, 0, 200)));
+	UStaticMeshComponent* SimulatedComponent = Simulated->GetStaticMeshComponent();
+	SimulatedComponent->SetMobility(EComponentMobility::Movable);
+	SimulatedComponent->SetStaticMesh(Cube);
+	SimulatedComponent->BodyInstance.bSimulatePhysics = true;
+
+	// ...and plain static scenery that must stay untouched.
+	AStaticMeshActor* Scenery = SpawnPlacedMeshActor(Test.World, Cube,
+		FTransform(FQuat::Identity, FVector(500, 0, 200), FVector::OneVector));
+
+	TestEqual(TEXT("only the simulating actor converts"), Box3D::ConvertSimulatedActors(Test.World), 1);
+	TestTrue(TEXT("simulating actor destroyed"), !IsValid(Simulated) || Simulated->IsActorBeingDestroyed());
+	TestTrue(TEXT("scenery untouched"), IsValid(Scenery) && !Scenery->IsActorBeingDestroyed());
+
+	int32 PropCount = 0;
+	ABox3DPropActor* Prop = nullptr;
+	for (TActorIterator<ABox3DPropActor> It(Test.World); It; ++It)
+	{
+		++PropCount;
+		Prop = *It;
+	}
+	TestEqual(TEXT("exactly one prop spawned"), PropCount, 1);
+	if (Prop != nullptr)
+	{
+		TestTrue(TEXT("prop body live in Box3D"), Prop->GetBody()->IsSimulating());
+	}
+
+	TestEqual(TEXT("second pass finds nothing left"), Box3D::ConvertSimulatedActors(Test.World), 0);
+	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DPropConvertActorTest,

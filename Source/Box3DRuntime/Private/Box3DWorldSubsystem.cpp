@@ -4,6 +4,7 @@
 #include "Box3DConversion.h"
 #include "Box3DDebugDraw.h"
 #include "Box3DJointComponent.h"
+#include "Box3DPropConversion.h"
 #include "Box3DRuntime.h"
 #include "Box3DSettings.h"
 #include "Box3DStaticSceneMirror.h"
@@ -73,6 +74,12 @@ void UBox3DWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		StaticMirror->Initialize(GetWorld(), WorldId);
 	}
 
+	if (Settings->bConvertSimulatedActors)
+	{
+		LevelAddedHandle = FWorldDelegates::LevelAddedToWorld.AddUObject(
+			this, &UBox3DWorldSubsystem::OnLevelAddedToWorld);
+	}
+
 	UE_LOG(LogBox3D, Log, TEXT("Box3D world created for %s (gravity=%s cm/s^2, workers=%d, scheduler=%s)"),
 		*GetNameSafe(GetWorld()), *Settings->Gravity.ToCompactString(), Settings->WorkerCount,
 		Settings->WorkerCount <= 1 ? TEXT("serial")
@@ -81,6 +88,12 @@ void UBox3DWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void UBox3DWorldSubsystem::Deinitialize()
 {
+	if (LevelAddedHandle.IsValid())
+	{
+		FWorldDelegates::LevelAddedToWorld.Remove(LevelAddedHandle);
+		LevelAddedHandle.Reset();
+	}
+
 #if !UE_BUILD_SHIPPING
 	ClearSmokeBodies();
 #endif
@@ -127,6 +140,20 @@ void UBox3DWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	if (StaticMirror.IsValid())
 	{
 		StaticMirror->MirrorInitialLevels();
+	}
+
+	// After the mirror: converted props expect their static surroundings to exist.
+	if (GetDefault<UBox3DSettings>()->bConvertSimulatedActors)
+	{
+		Box3D::ConvertSimulatedActors(&InWorld);
+	}
+}
+
+void UBox3DWorldSubsystem::OnLevelAddedToWorld(ULevel* Level, UWorld* OwningWorld)
+{
+	if (OwningWorld == GetWorld() && OwningWorld->HasBegunPlay())
+	{
+		Box3D::ConvertSimulatedActors(OwningWorld, Level);
 	}
 }
 

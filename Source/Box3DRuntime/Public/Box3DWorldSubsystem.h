@@ -188,6 +188,9 @@ private:
 	/// Retry joints whose bodies were missing at BeginPlay.
 	void CreatePendingJoints();
 
+	/// bConvertSimulatedActors on streamed-in levels (begin-play covers the rest).
+	void OnLevelAddedToWorld(ULevel* Level, UWorld* OwningWorld);
+
 	/// Dispatch contact/hit/sensor/joint-threshold events to components. Runs
 	/// after every fixed step because box3d buffers events per step only.
 	void PumpEvents();
@@ -201,6 +204,7 @@ private:
 	b3WorldId WorldId = {};
 	float Accumulator = 0.0f;
 	uint64 StepCount = 0;
+	FDelegateHandle LevelAddedHandle;
 
 	/// Bridges solver tasks onto UE worker threads (Settings: WorkerCount > 1 with
 	/// TaskSystem == UnrealTasks). Must outlive the b3 world. TPimplPtr because the

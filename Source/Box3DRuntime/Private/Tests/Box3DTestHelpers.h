@@ -74,17 +74,19 @@ namespace Box3DTest
 		}
 	};
 
-	/// Temporarily enable interpolated body transforms (read live each Tick, so the
-	/// scope only needs to cover the ticks under test).
+	/// Temporarily force interpolated body transforms on or off (read live each
+	/// Tick, so the scope only needs to cover the ticks under test). Tests that
+	/// assert exact post-step positions must force it OFF: the project config can
+	/// enable interpolation, which lags component transforms by up to one step.
 	struct FScopedInterpolationSettings
 	{
 		bool bSaved;
 
-		FScopedInterpolationSettings()
+		explicit FScopedInterpolationSettings(bool bEnable = true)
 		{
 			UBox3DSettings* Settings = GetMutableDefault<UBox3DSettings>();
 			bSaved = Settings->bInterpolateBodyTransforms;
-			Settings->bInterpolateBodyTransforms = true;
+			Settings->bInterpolateBodyTransforms = bEnable;
 		}
 
 		~FScopedInterpolationSettings()

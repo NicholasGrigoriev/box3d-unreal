@@ -146,6 +146,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DBodyVelocityImpulseTest,
 	"Box3DUnreal.Body.VelocityForceImpulse", BOX3D_TEST_FLAGS)
 bool FBox3DBodyVelocityImpulseTest::RunTest(const FString& Parameters)
 {
+	// Exact-position assertions need non-interpolated component sync; the project
+	// config may enable interpolation, which lags transforms by one fixed step.
+	Box3DTest::FScopedInterpolationSettings NoInterpolation(false);
 	Box3DTest::FTestWorld Test;
 	const float FixedDt = Box3DTest::FTestWorld::FixedDt();
 

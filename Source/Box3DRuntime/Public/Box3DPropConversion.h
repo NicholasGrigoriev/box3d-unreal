@@ -21,4 +21,10 @@ namespace Box3D
 	/// component (remaining instances re-mirror, since removal reindexes them) and
 	/// a prop spawns at its transform.
 	BOX3DRUNTIME_API ABox3DPropActor* ConvertInstanceToProp(UInstancedStaticMeshComponent* Ism, int32 InstanceIndex);
+
+	/// Convert every AStaticMeshActor whose root component has Simulate Physics
+	/// authored into a Box3D prop — the pass behind
+	/// UBox3DSettings::bConvertSimulatedActors. OnlyLevel restricts the sweep to
+	/// one streamed-in level; null sweeps the whole world. Returns conversions.
+	BOX3DRUNTIME_API int32 ConvertSimulatedActors(UWorld* World, const ULevel* OnlyLevel = nullptr);
 }

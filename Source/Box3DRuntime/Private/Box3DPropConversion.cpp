@@ -9,6 +9,7 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 
 namespace
 {
@@ -100,5 +101,46 @@ namespace Box3D
 		UE_LOG(LogBox3D, Log, TEXT("ConvertInstanceToProp: %s[%d] (%s) -> %s"),
 			*GetNameSafe(Ism), InstanceIndex, *GetNameSafe(Mesh), *GetNameSafe(Prop));
 		return Prop;
+	}
+
+	int32 ConvertSimulatedActors(UWorld* World, const ULevel* OnlyLevel)
+	{
+		if (World == nullptr)
+		{
+			return 0;
+		}
+
+		// Collect first: conversion destroys actors and spawns props, neither of
+		// which belongs inside the iterator.
+		TArray<AStaticMeshActor*> Candidates;
+		for (TActorIterator<AStaticMeshActor> It(World); It; ++It)
+		{
+			AStaticMeshActor* Actor = *It;
+			const UStaticMeshComponent* Component = Actor->GetStaticMeshComponent();
+			// The authored flag, not IsSimulatingPhysics(): streamed-in actors may
+			// not have created their physics state yet when this pass runs.
+			if (Component == nullptr || Component->GetStaticMesh() == nullptr
+				|| !Component->BodyInstance.bSimulatePhysics
+				|| (OnlyLevel != nullptr && Actor->GetLevel() != OnlyLevel))
+			{
+				continue;
+			}
+			Candidates.Add(Actor);
+		}
+
+		int32 Converted = 0;
+		for (AStaticMeshActor* Actor : Candidates)
+		{
+			if (ConvertToProp(Actor) != nullptr)
+			{
+				++Converted;
+			}
+		}
+		if (Converted > 0)
+		{
+			UE_LOG(LogBox3D, Log, TEXT("ConvertSimulatedActors: %d simulating actor(s) now Box3D props (%s)"),
+				Converted, OnlyLevel ? *GetNameSafe(OnlyLevel) : TEXT("whole world"));
+		}
+		return Converted;
 	}
 }
