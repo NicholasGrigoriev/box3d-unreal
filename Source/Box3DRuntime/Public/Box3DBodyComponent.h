@@ -129,6 +129,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Body", meta = (ClampMin = "0"))
 	float GroundWeightKg = 0.0f;
 
+	/// Kinematic bodies only: cap (cm/s) on the velocity a per-step target
+	/// transform may imply. Component moves faster than this (teleports, dashes,
+	/// scripted parkour glides) snap the body into place instead of ramming
+	/// everything on the path with infinite mass at teleport speed. 0 = no cap.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Body", meta = (ClampMin = "0"))
+	float MaxKinematicTargetSpeed = 0.0f;
+
 	/// Shape attached to the body.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Shape")
 	EBox3DShapeType ShapeType = EBox3DShapeType::Box;

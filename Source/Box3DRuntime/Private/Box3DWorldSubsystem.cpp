@@ -265,6 +265,20 @@ void UBox3DWorldSubsystem::PushKinematicTargets(float FixedDeltaTime)
 
 		const b3WorldTransform Target{ Box3D::ToB3Pos(Component->GetComponentLocation()),
 									   Box3D::ToB3(Component->GetComponentQuat()) };
+
+		// Moves faster than the body's cap are teleports as far as physics is
+		// concerned: snap first so the velocity-based target below computes ~zero
+		// velocity instead of a battering-ram impulse for anything on the path.
+		if (Component->MaxKinematicTargetSpeed > 0.0f)
+		{
+			const FVector CurrentLocation = Box3D::ToUEPos(b3Body_GetTransform(Component->GetBodyId()).p);
+			const float ImpliedSpeed = FVector::Dist(Component->GetComponentLocation(), CurrentLocation) / FixedDeltaTime;
+			if (ImpliedSpeed > Component->MaxKinematicTargetSpeed)
+			{
+				b3Body_SetTransform(Component->GetBodyId(), Target.p, Target.q);
+			}
+		}
+
 		b3Body_SetTargetTransform(Component->GetBodyId(), Target, FixedDeltaTime, /*wake*/ true);
 
 		// Weight transfer rides the same pre-step pass: forces clear after every

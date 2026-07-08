@@ -170,4 +170,37 @@ bool FBox3DGroundWeightTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DKinematicSpeedCapTest,
+	"Box3DUnreal.Body.KinematicTargetSpeedCap", BOX3D_TEST_FLAGS)
+bool FBox3DKinematicSpeedCapTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld Test;
+
+	const auto SpawnPawn = [&Test](float X, float MaxSpeed)
+	{
+		return Box3DTest::SpawnBody(Test.World, FVector(X, 0, 100), [MaxSpeed](UBox3DBodyComponent& Body)
+		{
+			Body.BodyType = EBox3DBodyType::Kinematic;
+			Body.ShapeType = EBox3DShapeType::Capsule;
+			Body.CapsuleRadius = 30.0f;
+			Body.CapsuleHalfHeight = 90.0f;
+			Body.MaxKinematicTargetSpeed = MaxSpeed;
+		});
+	};
+	UBox3DBodyComponent* Capped = SpawnPawn(0.0f, 500.0f);
+	UBox3DBodyComponent* Uncapped = SpawnPawn(1000.0f, 0.0f);
+
+	// Teleport both 400 cm in one tick: 24000 cm/s of implied velocity.
+	Capped->SetWorldLocation(FVector(400, 0, 100));
+	Uncapped->SetWorldLocation(FVector(1400, 0, 100));
+	Test.Step(1);
+
+	TestTrue(FString::Printf(TEXT("capped body snaps without velocity (%f cm/s)"), Capped->GetLinearVelocity().Size()),
+		Capped->GetLinearVelocity().Size() < 50.0f);
+	TestTrue(FString::Printf(TEXT("uncapped body carries teleport velocity (%f cm/s)"), Uncapped->GetLinearVelocity().Size()),
+		Uncapped->GetLinearVelocity().Size() > 10000.0f);
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
