@@ -44,21 +44,10 @@ rest shape in the editor, and spawn at the crosshair via `box3d.SpawnRope` /
 `box3d.SpawnCloth`. Plus a special-actor zoo: `ABox3DBreakableActor` (child
 meshes become welded chunks that shatter past a break force —
 `box3d.SpawnBreakable`), `ABox3DConveyorActor` (box3d surface-material tangent
-velocity drags resting bodies), `ABox3DWindActor` (per-fixed-step drag
+velocity drags resting bodies), and `ABox3DWindActor` (per-fixed-step drag
 forces via the subsystem's `OnPreStep` hook; directional, turbulence,
-spline-following, or vortex fields — `box3d.SpawnWind`), and
-`ABox3DLiquidSourceActor` (LiquidFun-style particle liquid: an emitter of
-self-colliding sphere particles with a fixed-step cohesion/viscosity pass so
-it pours, pools, and spreads; hard particle budget with oldest-recycling,
-lifetime with shrink-out despawn, instanced-mesh rendering with fixed-step
-interpolation and a shipped translucent water material (`M_Box3DLiquid`,
-MID-tunable, age-fading via per-instance custom data) — `box3d.SpawnLiquid`)
-with its counterpart
-`ABox3DLiquidDrainActor` (a suction sink: radial pull with configurable
-strength/falloff, swallows particles reaching its core with a shrink-out,
-rate-limitable so a slow drain against a fast source overflows —
-`box3d.SpawnDrain`).
-All of it is pinned by a deterministic automation suite — 66 tests
+spline-following, or vortex fields — `box3d.SpawnWind`).
+All of it is pinned by a deterministic automation suite — 59 tests
 (`Automation RunTests Box3DUnreal`, see [docs/TESTING.md](docs/TESTING.md)).
 See [docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap,
 [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions, and
