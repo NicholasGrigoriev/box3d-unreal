@@ -18,6 +18,11 @@ namespace
 	// UE gameplay units -> box3d SI: one factor of 0.01 per length dimension.
 	constexpr float ForceScale = 0.01f;   // kg*cm/s^2 -> N, kg*cm/s -> kg*m/s
 	constexpr float TorqueScale = 0.0001f; // kg*cm^2/s^2 -> N*m, kg*cm^2/s -> kg*m^2/s
+
+	// GroundWeightKg probe reach past the shape bottom. Generous enough to bridge
+	// the character movement float height and small step-down gaps without pressing
+	// on bodies the pawn is merely jumping over.
+	constexpr float GroundWeightProbeSlackCm = 20.0f;
 }
 
 UBox3DBodyComponent::UBox3DBodyComponent()
@@ -70,7 +75,22 @@ void UBox3DBodyComponent::CreateBody()
 	// Auto-fitted extents are already in world units; explicit extents still need
 	// the component's world scale applied.
 	const bool bFitted = bAutoFitShape && TryAutoFitShape();
-	CreateShape(bFitted ? FVector::OneVector : GetComponentTransform().GetScale3D());
+	const FVector ShapeScale = (bFitted ? FVector::OneVector : GetComponentTransform().GetScale3D()).GetAbs();
+	CreateShape(ShapeScale);
+
+	switch (ShapeType)
+	{
+	case EBox3DShapeType::Box:     ShapeBottomExtentCm = BoxHalfExtent.Z * ShapeScale.Z; break;
+	case EBox3DShapeType::Sphere:  ShapeBottomExtentCm = SphereRadius * ShapeScale.GetMax(); break;
+	case EBox3DShapeType::Capsule: ShapeBottomExtentCm = CapsuleHalfHeight * ShapeScale.Z; break;
+	default:
+		if (const UPrimitiveComponent* Primitive = FindSourcePrimitive())
+		{
+			ShapeBottomExtentCm = Primitive->CalcLocalBounds().BoxExtent.Z
+				* FMath::Abs(Primitive->GetComponentTransform().GetScale3D().Z);
+		}
+		break;
+	}
 
 	if (BodyType == EBox3DBodyType::Kinematic)
 	{
@@ -279,6 +299,47 @@ void UBox3DBodyComponent::SyncTransformFromPhysics(const FVector& NewLocation, c
 	bSyncingFromPhysics = true;
 	SetWorldLocationAndRotation(NewLocation, NewRotation, /*bSweep*/ false, nullptr, ETeleportType::TeleportPhysics);
 	bSyncingFromPhysics = false;
+}
+
+void UBox3DBodyComponent::ApplyGroundWeight(b3WorldId WorldId) const
+{
+	if (GroundWeightKg <= 0.0f || !b3Body_IsValid(BodyId) || !b3Body_IsEnabled(BodyId))
+	{
+		return;
+	}
+
+	const b3Vec3 Gravity = b3World_GetGravity(WorldId);
+	const FVector Down = Box3D::ToUEDir(Gravity).GetSafeNormal();
+	if (Down.IsNearlyZero())
+	{
+		return;
+	}
+
+	// The probe carries this body's own filter, so its own shape (category not in
+	// its own mask for pawn setups) and anything it cannot collide with are skipped.
+	b3QueryFilter QueryFilter;
+	QueryFilter.categoryBits = Box3D::ToB3Bits(Filter.CategoryBits);
+	QueryFilter.maskBits = Box3D::ToB3Bits(Filter.MaskBits);
+
+	const FVector Translation = Down * (ShapeBottomExtentCm + GroundWeightProbeSlackCm);
+	const b3RayResult Hit = b3World_CastRayClosest(WorldId,
+		Box3D::ToB3Pos(GetComponentLocation()), Box3D::ToB3(Translation), QueryFilter);
+	if (!Hit.hit)
+	{
+		return;
+	}
+
+	const b3BodyId GroundBody = b3Shape_GetBody(Hit.shapeId);
+	if (b3Body_GetType(GroundBody) != b3_dynamicBody)
+	{
+		return;
+	}
+
+	// Weight force in newtons: kg * (m/s^2). Applied at the contact point so
+	// standing off-center tips the support. Forces clear after each step, hence
+	// the per-fixed-step application.
+	const b3Vec3 Force{ Gravity.x * GroundWeightKg, Gravity.y * GroundWeightKg, Gravity.z * GroundWeightKg };
+	b3Body_ApplyForce(GroundBody, Force, Hit.point, /*wake*/ true);
 }
 
 bool UBox3DBodyComponent::IsSimulating() const

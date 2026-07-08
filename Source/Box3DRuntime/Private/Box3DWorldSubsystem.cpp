@@ -239,6 +239,10 @@ void UBox3DWorldSubsystem::PushKinematicTargets(float FixedDeltaTime)
 		const b3WorldTransform Target{ Box3D::ToB3Pos(Component->GetComponentLocation()),
 									   Box3D::ToB3(Component->GetComponentQuat()) };
 		b3Body_SetTargetTransform(Component->GetBodyId(), Target, FixedDeltaTime, /*wake*/ true);
+
+		// Weight transfer rides the same pre-step pass: forces clear after every
+		// step, so this applies exactly once per step like OnPreStep forces.
+		Component->ApplyGroundWeight(WorldId);
 	}
 }
 

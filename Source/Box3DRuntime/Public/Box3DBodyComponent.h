@@ -120,6 +120,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Body")
 	bool bIsBullet = false;
 
+	/// Kinematic bodies only: a kinematic body has infinite contact mass, so it
+	/// pushes dynamic bodies but never presses down on what it stands on. A
+	/// non-zero weight fixes that: before every fixed step a short ray is cast
+	/// below the shape (filtered by this body's mask) and weight * gravity is
+	/// applied to the dynamic body it stands on, at the contact point — so pawns
+	/// tilt seesaws, sink rafts and weigh down planks. 0 = off.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Body", meta = (ClampMin = "0"))
+	float GroundWeightKg = 0.0f;
+
 	/// Shape attached to the body.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Shape")
 	EBox3DShapeType ShapeType = EBox3DShapeType::Box;
@@ -290,6 +299,10 @@ public:
 	/// Called by the world subsystem after a step moved this body.
 	void SyncTransformFromPhysics(const FVector& NewLocation, const FQuat& NewRotation);
 
+	/// Called by the world subsystem before each fixed step for kinematic bodies:
+	/// press GroundWeightKg onto the dynamic body underneath (no-op when 0).
+	void ApplyGroundWeight(b3WorldId WorldId) const;
+
 	//~ UActorComponent
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -312,6 +325,11 @@ private:
 	const UPrimitiveComponent* FindSourcePrimitive() const;
 
 	b3BodyId BodyId = {};
+
+	/// World-space distance from the body origin to the bottom of its shape,
+	/// resolved once at creation (auto-fit and scale applied). Sizes the
+	/// GroundWeightKg probe ray.
+	float ShapeBottomExtentCm = 0.0f;
 
 	/// Guards against OnUpdateTransform feeding physics-driven moves back into physics.
 	bool bSyncingFromPhysics = false;
