@@ -36,12 +36,17 @@ namespace
 
 	/// UE constraint frames put the twist axis on X; box3d puts cone and twist on
 	/// the frame Z. Cyclic re-basis (Xb3=Yue, Yb3=Zue, Zb3=Xue) keeps handedness.
-	b3Transform MakeJointFrame(const FTransform& UEFrame, const FVector& Scale)
+	FQuat RebasedFrameQuat(const FTransform& UEFrame)
 	{
 		const FMatrix M = FRotationMatrix::Make(UEFrame.GetRotation());
 		const FMatrix Rebased(M.GetUnitAxis(EAxis::Y), M.GetUnitAxis(EAxis::Z), M.GetUnitAxis(EAxis::X),
 			FVector::ZeroVector);
-		return b3Transform{ Box3D::ToB3(UEFrame.GetTranslation() * Scale), Box3D::ToB3(Rebased.ToQuat()) };
+		return Rebased.ToQuat();
+	}
+
+	b3Transform MakeJointFrame(const FTransform& UEFrame, const FVector& Scale)
+	{
+		return b3Transform{ Box3D::ToB3(UEFrame.GetTranslation() * Scale), Box3D::ToB3(RebasedFrameQuat(UEFrame)) };
 	}
 
 	/// Effective half-angle of one swing axis in degrees: Free is unlimited,
@@ -174,11 +179,53 @@ int32 Box3D::BuildRagdoll(b3WorldId WorldId, const FReferenceSkeleton& RefSkelet
 			continue;
 		}
 
+		const FTransform Frame2 = CI.GetRefFrame(EConstraintFrame::Frame2); // parent
+		const FTransform Frame1 = CI.GetRefFrame(EConstraintFrame::Frame1); // child
+		const b3BodyId ParentBody = OutBones[*ParentSlot].BodyId;
+		const b3BodyId ChildBody = OutBones[*ChildSlot].BodyId;
+
+		// Enemies die mid-animation, routinely outside the authored limits. A
+		// limit violated at spawn makes the solver snap the limb back with an
+		// impulse proportional to body mass — heavy ragdolls spaghettify, light
+		// ones jitter. Measure the spawn pose in the joint frame and widen every
+		// limit to include it (plus slack).
+		const FQuat WorldFrameA = OutBones[*ParentSlot].Q1 * RebasedFrameQuat(Frame2);
+		const FQuat WorldFrameB = OutBones[*ChildSlot].Q1 * RebasedFrameQuat(Frame1);
+		const FQuat Relative = WorldFrameA.Inverse() * WorldFrameB;
+		FQuat SwingQ, TwistQ;
+		Relative.ToSwingTwist(FVector::ZAxisVector, SwingQ, TwistQ);
+		const float SpawnSwingRad = 2.0f * FMath::Acos(FMath::Min(FMath::Abs(SwingQ.W), 1.0f));
+		const float SpawnTwistRad = Relative.GetTwistAngle(FVector::ZAxisVector);
+		const float SlackRad = FMath::DegreesToRadians(FMath::Max(Params.LimitSlackDeg, 0.0f));
+
+		const EAngularConstraintMotion Swing1Motion = CI.GetAngularSwing1Motion();
+		const EAngularConstraintMotion Swing2Motion = CI.GetAngularSwing2Motion();
+		const EAngularConstraintMotion TwistMotion = CI.GetAngularTwistMotion();
+
+		// Fully locked constraints become welds resting at the spawn pose: zero-
+		// width limits on a spherical joint are equality constraints an iterative
+		// solver fights forever (the classic lying-still-but-wiggling-hands).
+		if (Params.bUseConstraintLimits
+			&& Swing1Motion == ACM_Locked && Swing2Motion == ACM_Locked && TwistMotion == ACM_Locked)
+		{
+			b3WeldJointDef Weld = b3DefaultWeldJointDef();
+			Weld.base.bodyIdA = ParentBody;
+			Weld.base.bodyIdB = ChildBody;
+			Weld.base.localFrameA = MakeJointFrame(Frame2, MeshScale);
+			// Rotate frame B so the weld's rest pose IS the spawn pose.
+			const FQuat FrameBRot = OutBones[*ChildSlot].Q1.Inverse() * WorldFrameA;
+			Weld.base.localFrameB = b3Transform{ Box3D::ToB3(Frame1.GetTranslation() * MeshScale),
+												 Box3D::ToB3(FrameBRot) };
+			Weld.base.collideConnected = false;
+			OutJoints.Add(b3CreateWeldJoint(WorldId, &Weld));
+			continue;
+		}
+
 		b3SphericalJointDef Def = b3DefaultSphericalJointDef();
-		Def.base.bodyIdA = OutBones[*ParentSlot].BodyId;
-		Def.base.bodyIdB = OutBones[*ChildSlot].BodyId;
-		Def.base.localFrameA = MakeJointFrame(CI.GetRefFrame(EConstraintFrame::Frame2), MeshScale);
-		Def.base.localFrameB = MakeJointFrame(CI.GetRefFrame(EConstraintFrame::Frame1), MeshScale);
+		Def.base.bodyIdA = ParentBody;
+		Def.base.bodyIdB = ChildBody;
+		Def.base.localFrameA = MakeJointFrame(Frame2, MeshScale);
+		Def.base.localFrameB = MakeJointFrame(Frame1, MeshScale);
 		Def.base.collideConnected = false;
 		if (Params.ConstraintHertz > 0.0f)
 		{
@@ -190,23 +237,25 @@ int32 Box3D::BuildRagdoll(b3WorldId WorldId, const FReferenceSkeleton& RefSkelet
 		{
 			// box3d's cone is symmetric; approximate UE's swing1/swing2 pair with
 			// the wider of the two so limbs never end up tighter than authored.
-			const float Swing1 = EffectiveSwingDeg(CI.GetAngularSwing1Motion(), CI.GetAngularSwing1Limit());
-			const float Swing2 = EffectiveSwingDeg(CI.GetAngularSwing2Motion(), CI.GetAngularSwing2Limit());
+			const float Swing1 = EffectiveSwingDeg(Swing1Motion, CI.GetAngularSwing1Limit());
+			const float Swing2 = EffectiveSwingDeg(Swing2Motion, CI.GetAngularSwing2Limit());
 			if (Swing1 < 179.0f || Swing2 < 179.0f)
 			{
 				Def.enableConeLimit = true;
-				Def.coneAngle = FMath::Clamp(FMath::DegreesToRadians(FMath::Max(Swing1, Swing2)), 0.0f, PI);
+				const float AuthoredConeRad = FMath::DegreesToRadians(FMath::Max(Swing1, Swing2));
+				Def.coneAngle = FMath::Clamp(FMath::Max(AuthoredConeRad, SpawnSwingRad + SlackRad), 0.0f, PI);
 			}
 
-			const EAngularConstraintMotion TwistMotion = CI.GetAngularTwistMotion();
 			if (TwistMotion != ACM_Free)
 			{
-				const float TwistRad = TwistMotion == ACM_Locked
+				const float AuthoredTwistRad = TwistMotion == ACM_Locked
 					? 0.0f
 					: FMath::Clamp(FMath::DegreesToRadians(CI.GetAngularTwistLimit()), 0.0f, 0.98f * PI);
 				Def.enableTwistLimit = true;
-				Def.lowerTwistAngle = -TwistRad;
-				Def.upperTwistAngle = TwistRad;
+				Def.lowerTwistAngle = FMath::Clamp(FMath::Min(-AuthoredTwistRad, SpawnTwistRad - SlackRad),
+					-0.98f * PI, 0.0f);
+				Def.upperTwistAngle = FMath::Clamp(FMath::Max(AuthoredTwistRad, SpawnTwistRad + SlackRad),
+					0.0f, 0.98f * PI);
 			}
 		}
 
@@ -277,6 +326,7 @@ bool UBox3DRagdollComponent::StartRagdoll(USkeletalMeshComponent* Mesh, FVector 
 	Params.MassScale = MassScale;
 	Params.MinMassFraction = MinBodyMassFraction;
 	Params.bUseConstraintLimits = bUseConstraintLimits;
+	Params.LimitSlackDeg = LimitSlackDeg;
 	Params.ConstraintHertz = ConstraintHertz;
 	Params.ConstraintDampingRatio = ConstraintDampingRatio;
 

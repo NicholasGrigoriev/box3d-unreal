@@ -51,9 +51,14 @@ namespace Box3D
 		/// spherical joints (position-only, floppy).
 		bool bUseConstraintLimits = true;
 
+		/// Degrees added when widening limits to include the spawn pose (death
+		/// animations routinely violate authored limits; snapping back at spawn
+		/// spaghettifies heavy ragdolls). Also the effective minimum limit width.
+		float LimitSlackDeg = 3.0f;
+
 		/// Joint constraint softness (b3JointDef advanced fields). Hertz > 0
-		/// softens position/limit corrections — the anti-jitter lever; 0 keeps
-		/// box3d's default rigidity. DampingRatio applies only when Hertz > 0.
+		/// overrides box3d's default (60 Hz, ratio 2). DampingRatio applies only
+		/// when Hertz > 0.
 		float ConstraintHertz = 0.0f;
 		float ConstraintDampingRatio = 2.0f;
 	};
@@ -128,6 +133,11 @@ public:
 	/// Map the physics asset's cone/twist limits onto the joints.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Ragdoll")
 	bool bUseConstraintLimits = true;
+
+	/// Slack (degrees) when widening limits to include the death pose, and the
+	/// effective minimum limit width. Prevents spawn-time limit snapping.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D|Ragdoll", meta = (ClampMin = "0"))
+	float LimitSlackDeg = 3.0f;
 
 	/// Joint softness in Hertz: > 0 softens limit corrections (anti-jitter);
 	/// 0 keeps box3d's default rigidity.
