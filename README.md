@@ -32,8 +32,12 @@ so dynamic bodies rest on existing maps with zero per-actor setup;
 `ABox3DPropActor` plus `Box3D::ConvertToProp` / `box3d.MakeProp` to turn any
 placed static mesh (or ISM instance) into a live physics prop whose mesh keeps
 Chaos query collision for unchanged gameplay traces; `AddImpulseAtLocation` /
-`AddForceAtLocation` on the body component; and optional render interpolation
-between fixed steps (`bInterpolateBodyTransforms`) for high-refresh displays.
+`AddForceAtLocation` on the body component; `UBox3DGrabComponent` (physics
+hands: mass-gated grab/carry/throw with a velocity-tracking grip — held bodies
+stay dynamic, sag when heavy, throw at impulse/mass — and it doubles as the
+winch for pull-the-light-thing-to-me grapples); and optional render
+interpolation between fixed steps (`bInterpolateBodyTransforms`) for
+high-refresh displays.
 Soft-body actors built from raw bodies behind purely visual skins:
 `ABox3DRopeActor` (capsule chain + spherical joints, rendered as spline meshes;
 pin the far end, `AttachActorToEnd` at runtime, or snap it via `LinkBreakForce`
@@ -47,7 +51,7 @@ meshes become welded chunks that shatter past a break force —
 velocity drags resting bodies), and `ABox3DWindActor` (per-fixed-step drag
 forces via the subsystem's `OnPreStep` hook; directional, turbulence,
 spline-following, or vortex fields — `box3d.SpawnWind`).
-All of it is pinned by a deterministic automation suite — 59 tests
+All of it is pinned by a deterministic automation suite — 62 tests
 (`Automation RunTests Box3DUnreal`, see [docs/TESTING.md](docs/TESTING.md)).
 See [docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap,
 [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions, and
