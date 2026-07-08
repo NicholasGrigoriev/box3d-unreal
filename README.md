@@ -51,7 +51,9 @@ spline-following, or vortex fields — `box3d.SpawnWind`), and
 self-colliding sphere particles with a fixed-step cohesion/viscosity pass so
 it pours, pools, and spreads; hard particle budget with oldest-recycling,
 lifetime with shrink-out despawn, instanced-mesh rendering with fixed-step
-interpolation — `box3d.SpawnLiquid`) with its counterpart
+interpolation and a shipped translucent water material (`M_Box3DLiquid`,
+MID-tunable, age-fading via per-instance custom data) — `box3d.SpawnLiquid`)
+with its counterpart
 `ABox3DLiquidDrainActor` (a suction sink: radial pull with configurable
 strength/falloff, swallows particles reaching its core with a shrink-out,
 rate-limitable so a slow drain against a fast source overflows —

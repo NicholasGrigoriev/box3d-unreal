@@ -8,6 +8,7 @@
 #include "DrawDebugHelpers.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "Materials/MaterialInterface.h"
 #include "UObject/ConstructorHelpers.h"
 #include "box3d/box3d.h"
 
@@ -47,6 +48,14 @@ ABox3DLiquidSourceActor::ABox3DLiquidSourceActor()
 	if (SphereFinder.Succeeded())
 	{
 		ParticleMesh = SphereFinder.Object;
+	}
+	// Plugin-shipped translucent water (MID-tunable: colors, opacity,
+	// roughness, AgeFade); reads particle age from custom data slot 0.
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> WaterFinder(
+		TEXT("/Box3DUnreal/M_Box3DLiquid.M_Box3DLiquid"));
+	if (WaterFinder.Succeeded())
+	{
+		ParticleMaterial = WaterFinder.Object;
 	}
 
 	Filter.CategoryBits = 1 << static_cast<int32>(EBox3DChannel::Debris);
