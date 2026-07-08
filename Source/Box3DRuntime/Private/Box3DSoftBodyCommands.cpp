@@ -7,9 +7,12 @@
 //                                                crosshair — shoot it apart
 //   box3d.SpawnWind [mode=directional] [Speed]   wind source at the crosshair
 //                                                (directional|turbulence|vortex)
+//   box3d.SpawnLiquid [Rate=120] [Max=400]       liquid tap pouring onto the
+//                                                point under the crosshair
 
 #include "Box3DBreakableActor.h"
 #include "Box3DClothActor.h"
+#include "Box3DLiquidSourceActor.h"
 #include "Box3DRopeActor.h"
 #include "Box3DRuntime.h"
 #include "Box3DWindActor.h"
@@ -174,6 +177,33 @@ static FAutoConsoleCommandWithWorldAndArgs GBox3DSpawnWindCommand(
 		Wind->FinishSpawning(Transform);
 		UE_LOG(LogBox3D, Log, TEXT("box3d.SpawnWind: mode %d, %.0f cm/s at %s"),
 			static_cast<int32>(Mode), Wind->WindSpeed, *SpawnPoint.ToCompactString());
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GBox3DSpawnLiquidCommand(
+	TEXT("box3d.SpawnLiquid"),
+	TEXT("Hang a Box3D liquid tap 150 cm above the point under the crosshair, pouring down. Usage: box3d.SpawnLiquid [Rate=120] [MaxParticles=400]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		FVector SpawnPoint;
+		FRotator ViewRotation;
+		if (World == nullptr || !GetSpawnPoint(World, SpawnPoint, ViewRotation))
+		{
+			return;
+		}
+
+		// Forward = flow direction; pitch -90 pours onto the crosshair point.
+		const FTransform Transform(FRotator(-90.0, 0.0, 0.0), SpawnPoint + FVector(0, 0, 150));
+		ABox3DLiquidSourceActor* Liquid = World->SpawnActorDeferred<ABox3DLiquidSourceActor>(
+			ABox3DLiquidSourceActor::StaticClass(), Transform);
+		if (Liquid == nullptr)
+		{
+			return;
+		}
+		Liquid->SpawnRate = Args.Num() > 0 ? FMath::Clamp(FCString::Atof(*Args[0]), 1.0f, 1000.0f) : 120.0f;
+		Liquid->MaxParticles = Args.Num() > 1 ? FMath::Clamp(FCString::Atoi(*Args[1]), 1, 2000) : 400;
+		Liquid->FinishSpawning(Transform);
+		UE_LOG(LogBox3D, Log, TEXT("box3d.SpawnLiquid: %.0f/s, cap %d at %s"),
+			Liquid->SpawnRate, Liquid->MaxParticles, *SpawnPoint.ToCompactString());
 	}));
 
 #endif // !UE_BUILD_SHIPPING
