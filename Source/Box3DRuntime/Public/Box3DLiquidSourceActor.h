@@ -57,9 +57,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Emission", meta = (ClampMin = "0", ClampMax = "45"))
 	float JitterAngleDeg = 5.0f;
 
-	/// Nozzle disc radius in cm, perpendicular to the flow. 0 = point source.
+	/// Nozzle disc radius in cm, perpendicular to the flow. Keep it at least
+	/// around the particle radius: a true point source spawns consecutive
+	/// particles inside each other at pour speeds, and every deep overlap is
+	/// pure solver waste.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Emission", meta = (ClampMin = "0"))
-	float SpawnRadius = 0.0f;
+	float SpawnRadius = 8.0f;
 
 	/// Seed for spawn jitter, so recordings replay deterministically.
 	UPROPERTY(EditAnywhere, Category = "Emission")
@@ -120,8 +123,17 @@ public:
 	/// Hard particle budget. At the cap the oldest particle is recycled into
 	/// each new spawn (bRecycleOldestWhenFull), so flow never stops — the pool
 	/// just stops growing.
+	///
+	/// THE performance dial. Cost is linear: a dense pool runs ~10 contacts
+	/// per particle, all solved SubStepCount times per fixed step, and while
+	/// the tap flows nothing sleeps (recycling keeps raining). Measured on a
+	/// 16-core dev box: 400 particles ~ 3.3 ms/step physics — and once a frame
+	/// runs long, the fixed-step accumulator plays catch-up with up to
+	/// MaxStepsPerTick steps per frame, multiplying that cost right when you
+	/// can least afford it. If you need more visible liquid, raising
+	/// ParticleRadius buys volume far cheaper than raising the cap.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Budget", meta = (ClampMin = "1", ClampMax = "2000"))
-	int32 MaxParticles = 400;
+	int32 MaxParticles = 200;
 
 	/// Seconds a particle lives before despawning. 0 = forever (the cap still
 	/// bounds the total).
@@ -268,6 +280,9 @@ private:
 	float ParticleMassKg = 0.0f;
 	uint64 LastVisualStep = 0;
 	bool bAllAsleep = false;
+	/// Any particle close enough to its lifetime that shrink animation is (or
+	/// is about to be) running — blocks the settled-visual skip.
+	bool bAnyNearExpiry = false;
 
 	/// Reused per-step/per-frame buffers.
 	TMap<FIntVector, TArray<int32, TInlineAllocator<8>>> NeighborGrid;
@@ -276,4 +291,7 @@ private:
 	TArray<FVector> ScratchForces;
 	TArray<bool> ScratchAwake;
 	TArray<FTransform> InstanceTransforms;
+	/// Last age bucket written to each ISM instance's custom data — ages move
+	/// slowly, so quantized writes skip ~all of the per-instance update cost.
+	TArray<uint8> InstanceAgeBuckets;
 };

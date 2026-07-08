@@ -58,7 +58,7 @@ with its counterpart
 strength/falloff, swallows particles reaching its core with a shrink-out,
 rate-limitable so a slow drain against a fast source overflows —
 `box3d.SpawnDrain`).
-All of it is pinned by a deterministic automation suite — 65 tests
+All of it is pinned by a deterministic automation suite — 66 tests
 (`Automation RunTests Box3DUnreal`, see [docs/TESTING.md](docs/TESTING.md)).
 See [docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap,
 [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions, and

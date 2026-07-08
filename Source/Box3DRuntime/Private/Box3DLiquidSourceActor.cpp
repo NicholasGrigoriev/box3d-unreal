@@ -44,8 +44,17 @@ ABox3DLiquidSourceActor::ABox3DLiquidSourceActor()
 	DirectionArrow->ArrowSize = 2.0f;
 	DirectionArrow->ArrowColor = FColor(90, 160, 255);
 
+	// Plugin low-poly sphere (~430 tris) first: the engine basic sphere is
+	// ~2.9k triangles, and dense geometry x hundreds of instances x
+	// translucent overdraw is real GPU cost for centimeter-sized blobs.
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> LowPolyFinder(
+		TEXT("/Box3DUnreal/SM_Box3DLiquidSphere.SM_Box3DLiquidSphere"));
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereFinder(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-	if (SphereFinder.Succeeded())
+	if (LowPolyFinder.Succeeded())
+	{
+		ParticleMesh = LowPolyFinder.Object;
+	}
+	else if (SphereFinder.Succeeded())
 	{
 		ParticleMesh = SphereFinder.Object;
 	}
@@ -489,6 +498,7 @@ void ABox3DLiquidSourceActor::Tick(float DeltaSeconds)
 	{
 		const bool bConsecutive = Step == LastVisualStep + 1;
 		bAllAsleep = true;
+		bAnyNearExpiry = false;
 		for (FLiquidParticle& Particle : Particles)
 		{
 			const FVector Position = Box3D::ToUEPos(b3Body_GetPosition(Particle.Body));
@@ -496,13 +506,17 @@ void ABox3DLiquidSourceActor::Tick(float DeltaSeconds)
 			Particle.P1 = Position;
 			// A sleeping particle mid-swallow still animates its shrink.
 			bAllAsleep &= !b3Body_IsAwake(Particle.Body) && Particle.ConsumeSeconds <= 0.0f;
+			bAnyNearExpiry |= ParticleLifetime > 0.0f && Particle.Age > ParticleLifetime - 0.1f;
 		}
 		LastVisualStep = Step;
 	}
-	else if (bAllAsleep && !bFlowing && ParticleLifetime <= 0.0f
+	else if (bAllAsleep && !bFlowing && !bAnyNearExpiry
 		&& ParticleMeshes->GetInstanceCount() == Particles.Num())
 	{
-		return; // settled and already rendered
+		// Settled and already rendered. Age fade (custom data) freezes while
+		// the pool sleeps — invisible at AgeFade rates; expiry re-enables
+		// updates via bAnyNearExpiry before the shrink starts.
+		return;
 	}
 
 	UpdateVisual();
@@ -527,6 +541,7 @@ void ABox3DLiquidSourceActor::Tick(float DeltaSeconds)
 void ABox3DLiquidSourceActor::UpdateVisual()
 {
 	const int32 Count = Particles.Num();
+	const bool bCountChanged = ParticleMeshes->GetInstanceCount() != Count;
 	while (ParticleMeshes->GetInstanceCount() < Count)
 	{
 		ParticleMeshes->AddInstance(FTransform::Identity, /*bWorldSpace*/ true);
@@ -538,6 +553,13 @@ void ABox3DLiquidSourceActor::UpdateVisual()
 	if (Count == 0)
 	{
 		return;
+	}
+	if (bCountChanged || InstanceAgeBuckets.Num() != Count)
+	{
+		// RemoveAtSwap reshuffles the particle->instance mapping, so every
+		// cached bucket is suspect; force a full custom-data rewrite.
+		InstanceAgeBuckets.Reset();
+		InstanceAgeBuckets.Init(255, Count);
 	}
 
 	const float Alpha = GetWorld()->GetSubsystem<UBox3DWorldSubsystem>()->GetFixedStepAlpha();
@@ -552,9 +574,17 @@ void ABox3DLiquidSourceActor::UpdateVisual()
 			FMath::Lerp(Particle.P0, Particle.P1, Alpha),
 			FVector(BaseScale * ParticleScale(Particle)));
 		// Custom data 0: normalized age for material effects (foam, fade-out).
-		ParticleMeshes->SetCustomDataValue(Index, 0,
-			ParticleLifetime > 0.0f ? FMath::Clamp(Particle.Age / ParticleLifetime, 0.0f, 1.0f) : 0.0f,
-			/*bMarkRenderStateDirty*/ false);
+		// Ages crawl, so writes are quantized to 1/32 steps — most frames
+		// touch no instance at all instead of paying N per-instance updates.
+		const float AgeFraction = ParticleLifetime > 0.0f
+			? FMath::Clamp(Particle.Age / ParticleLifetime, 0.0f, 1.0f)
+			: 0.0f;
+		const uint8 Bucket = static_cast<uint8>(AgeFraction * 31.0f);
+		if (InstanceAgeBuckets[Index] != Bucket)
+		{
+			InstanceAgeBuckets[Index] = Bucket;
+			ParticleMeshes->SetCustomDataValue(Index, 0, AgeFraction, /*bMarkRenderStateDirty*/ false);
+		}
 	}
 	ParticleMeshes->BatchUpdateInstancesTransforms(0, InstanceTransforms,
 		/*bWorldSpace*/ true, /*bMarkRenderStateDirty*/ true, /*bTeleport*/ true);
