@@ -7,6 +7,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "Box3DLiquidDrainActor.h"
 #include "Box3DLiquidSourceActor.h"
 #include "Tests/Box3DTestHelpers.h"
 
@@ -20,6 +21,17 @@ namespace
 		Setup(*Liquid);
 		Liquid->FinishSpawning(Transform);
 		return Liquid;
+	}
+
+	ABox3DLiquidDrainActor* SpawnLiquidDrain(UWorld* World, const FVector& Location,
+		TFunctionRef<void(ABox3DLiquidDrainActor&)> Setup)
+	{
+		const FTransform Transform(Location);
+		ABox3DLiquidDrainActor* Drain = World->SpawnActorDeferred<ABox3DLiquidDrainActor>(
+			ABox3DLiquidDrainActor::StaticClass(), Transform);
+		Setup(*Drain);
+		Drain->FinishSpawning(Transform);
+		return Drain;
 	}
 
 	/// Pointing straight down: forward (+X) rotated onto -Z.
@@ -178,6 +190,96 @@ bool FBox3DLiquidCohesionTest::RunTest(const FString& Parameters)
 	TestTrue(FString::Printf(TEXT("cohesion did not fling the pair apart (%f cm)"), PairDistance),
 		PairDistance > 2.0f);
 	TestEqual(TEXT("distant pair unaffected"), ControlDistance, 200.0f, 1.0f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DLiquidDrainSuctionTest,
+	"Box3DUnreal.Liquid.DrainSucksAndConsumes", BOX3D_TEST_FLAGS)
+bool FBox3DLiquidDrainSuctionTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld Test;
+
+	const FVector DrainCenter(0, 0, 1000);
+	// Weightless particles isolate the suction: with gravity in play a central
+	// pull turns into pendulum orbits around the plughole (SuctionDamping
+	// exists exactly for that), which makes trajectories assertion-hostile.
+	ABox3DLiquidSourceActor* Liquid = SpawnLiquidSource(Test.World, FTransform(DrainCenter),
+		[](ABox3DLiquidSourceActor& Source)
+		{
+			Source.bAutoStart = false;
+			Source.ParticleLifetime = 0.0f;
+			Source.GravityScale = 0.0f;
+		});
+	ABox3DLiquidDrainActor* Drain = SpawnLiquidDrain(Test.World, DrainCenter,
+		[](ABox3DLiquidDrainActor& Sink)
+		{
+			Sink.SuctionRadius = 400.0f;
+			Sink.SuctionStrength = 60.0f;
+			Sink.ConsumeRadius = 60.0f;
+			Sink.ConsumeShrinkSeconds = 0.1f;
+		});
+
+	// One particle inside the field, one control far outside it.
+	Liquid->SpawnParticleAt(DrainCenter + FVector(300, 0, 0), FVector::ZeroVector);
+	Liquid->SpawnParticleAt(DrainCenter + FVector(900, 0, 0), FVector::ZeroVector);
+
+	Test.Step(10);
+	const float PulledDistance = FVector::Dist(Liquid->GetParticleLocation(0), DrainCenter);
+	TestTrue(FString::Printf(TEXT("suction pulls the particle inward (%f cm)"), PulledDistance),
+		PulledDistance < 295.0f);
+
+	Test.Step(120);
+	TestEqual(TEXT("in-field particle swallowed, control survives"), Liquid->GetParticleCount(), 1);
+	TestEqual(TEXT("drain counted its meal"), Drain->GetTotalConsumed(), 1);
+	TestEqual(TEXT("out-of-field particle undisturbed horizontally"),
+		float(Liquid->GetParticleLocation(0).X), 900.0f, 1.0f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DLiquidDrainRateTest,
+	"Box3DUnreal.Liquid.DrainRateAndToggle", BOX3D_TEST_FLAGS)
+bool FBox3DLiquidDrainRateTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld Test;
+	Box3DTest::SpawnGround(Test.World);
+
+	ABox3DLiquidSourceActor* Liquid = SpawnLiquidSource(Test.World, FTransform(FVector(0, 0, 50)),
+		[](ABox3DLiquidSourceActor& Source)
+		{
+			Source.bAutoStart = false;
+			Source.ParticleLifetime = 0.0f;
+			Source.bCohesion = false;
+		});
+	// Rate-limited to exactly one swallow per fixed step (the 1.001 covers the
+	// dt*(1/dt) float round-off); pure sink, no suction forces in play.
+	ABox3DLiquidDrainActor* Drain = SpawnLiquidDrain(Test.World, FVector::ZeroVector,
+		[](ABox3DLiquidDrainActor& Sink)
+		{
+			Sink.SuctionRadius = 200.0f;
+			Sink.SuctionStrength = 0.0f;
+			Sink.ConsumeRadius = 100.0f;
+			Sink.ConsumeShrinkSeconds = 0.0f;
+			Sink.DrainRate = 1.001f / Box3DTest::FTestWorld::FixedDt();
+		});
+
+	// A 5x4 carpet of resting particles around the drain, all inside the core.
+	for (int32 Index = 0; Index < 20; ++Index)
+	{
+		Liquid->SpawnParticleAt(
+			FVector((Index % 5) * 24.0 - 48.0, (Index / 5) * 24.0 - 36.0, 6.0), FVector::ZeroVector);
+	}
+	TestEqual(TEXT("carpet placed"), Liquid->GetParticleCount(), 20);
+
+	Test.Step(6);
+	Drain->bEnabled = false;
+	Test.Step(2); // marked swallows finish their (instant) shrink and despawn
+
+	TestEqual(TEXT("rate limit swallowed exactly one per step"), Drain->GetTotalConsumed(), 6);
+	TestEqual(TEXT("swallowed particles despawned"), Liquid->GetParticleCount(), 14);
+
+	Test.Step(5);
+	TestEqual(TEXT("disabled drain swallows nothing"), Drain->GetTotalConsumed(), 6);
+	TestEqual(TEXT("pool stable while the drain is plugged"), Liquid->GetParticleCount(), 14);
 	return true;
 }
 

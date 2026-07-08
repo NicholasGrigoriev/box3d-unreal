@@ -9,9 +9,13 @@
 //                                                (directional|turbulence|vortex)
 //   box3d.SpawnLiquid [Rate=120] [Max=400]       liquid tap pouring onto the
 //                                                point under the crosshair
+//   box3d.SpawnDrain [Radius=250] [Strength=60]  liquid sink at the crosshair
+//                                                (sucks particles in, swallows
+//                                                them at the core)
 
 #include "Box3DBreakableActor.h"
 #include "Box3DClothActor.h"
+#include "Box3DLiquidDrainActor.h"
 #include "Box3DLiquidSourceActor.h"
 #include "Box3DRopeActor.h"
 #include "Box3DRuntime.h"
@@ -204,6 +208,32 @@ static FAutoConsoleCommandWithWorldAndArgs GBox3DSpawnLiquidCommand(
 		Liquid->FinishSpawning(Transform);
 		UE_LOG(LogBox3D, Log, TEXT("box3d.SpawnLiquid: %.0f/s, cap %d at %s"),
 			Liquid->SpawnRate, Liquid->MaxParticles, *SpawnPoint.ToCompactString());
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GBox3DSpawnDrainCommand(
+	TEXT("box3d.SpawnDrain"),
+	TEXT("Drop a Box3D liquid drain at the point under the crosshair. Usage: box3d.SpawnDrain [SuctionRadius=250] [Strength=60]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		FVector SpawnPoint;
+		FRotator ViewRotation;
+		if (World == nullptr || !GetSpawnPoint(World, SpawnPoint, ViewRotation))
+		{
+			return;
+		}
+
+		const FTransform Transform(FQuat::Identity, SpawnPoint);
+		ABox3DLiquidDrainActor* Drain = World->SpawnActorDeferred<ABox3DLiquidDrainActor>(
+			ABox3DLiquidDrainActor::StaticClass(), Transform);
+		if (Drain == nullptr)
+		{
+			return;
+		}
+		Drain->SuctionRadius = Args.Num() > 0 ? FMath::Clamp(FCString::Atof(*Args[0]), 10.0f, 5000.0f) : 250.0f;
+		Drain->SuctionStrength = Args.Num() > 1 ? FMath::Clamp(FCString::Atof(*Args[1]), 0.0f, 500.0f) : 60.0f;
+		Drain->FinishSpawning(Transform);
+		UE_LOG(LogBox3D, Log, TEXT("box3d.SpawnDrain: radius %.0f cm, %.0f m/s^2 at %s"),
+			Drain->SuctionRadius, Drain->SuctionStrength, *SpawnPoint.ToCompactString());
 	}));
 
 #endif // !UE_BUILD_SHIPPING

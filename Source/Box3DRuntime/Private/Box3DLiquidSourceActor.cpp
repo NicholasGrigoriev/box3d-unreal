@@ -156,17 +156,20 @@ FVector ABox3DLiquidSourceActor::NozzleVelocity() const
 	return Direction * InitialSpeed;
 }
 
-float ABox3DLiquidSourceActor::ParticleScale(float Age) const
+float ABox3DLiquidSourceActor::ParticleScale(const FLiquidParticle& Particle) const
 {
-	if (ParticleLifetime <= 0.0f || Age <= ParticleLifetime)
+	float Scale = 1.0f;
+	if (ParticleLifetime > 0.0f && Particle.Age > ParticleLifetime)
 	{
-		return 1.0f;
+		Scale = DespawnShrinkSeconds <= 0.0f
+			? 0.0f
+			: 1.0f - (Particle.Age - ParticleLifetime) / DespawnShrinkSeconds;
 	}
-	if (DespawnShrinkSeconds <= 0.0f)
+	if (Particle.ConsumeSeconds > 0.0f)
 	{
-		return 0.0f;
+		Scale = FMath::Min(Scale, 1.0f - Particle.ConsumeAge / Particle.ConsumeSeconds);
 	}
-	return FMath::Clamp(1.0f - (Age - ParticleLifetime) / DespawnShrinkSeconds, 0.0f, 1.0f);
+	return FMath::Clamp(Scale, 0.0f, 1.0f);
 }
 
 bool ABox3DLiquidSourceActor::SpawnParticleInternal(const FVector& Location, const FVector& VelocityCmS)
@@ -200,6 +203,7 @@ bool ABox3DLiquidSourceActor::SpawnParticleInternal(const FVector& Location, con
 	BodyDef.position = Box3D::ToB3Pos(Location);
 	BodyDef.linearVelocity = Box3D::ToB3(VelocityCmS);
 	BodyDef.linearDamping = LinearDamping;
+	BodyDef.gravityScale = GravityScale;
 	BodyDef.name = "Box3DLiquid";
 	// userData stays null: Box3D::ResolveComponent casts it to UObject on every
 	// query hit, so raw bodies must never carry anything else.
@@ -246,8 +250,45 @@ void ABox3DLiquidSourceActor::ResetParticle(int32 Index, const FVector& Location
 	b3Shape_SetSphere(Particle.Shape, &Sphere);
 
 	Particle.Age = 0.0f;
+	Particle.ConsumeSeconds = 0.0f;
+	Particle.ConsumeAge = 0.0f;
 	Particle.P0 = Location;
 	Particle.P1 = Location;
+}
+
+FVector ABox3DLiquidSourceActor::GetParticleLocation(int32 Index) const
+{
+	return Particles.IsValidIndex(Index)
+		? Box3D::ToUEPos(b3Body_GetPosition(Particles[Index].Body))
+		: FVector::ZeroVector;
+}
+
+FVector ABox3DLiquidSourceActor::GetParticleVelocity(int32 Index) const
+{
+	return Particles.IsValidIndex(Index)
+		? Box3D::ToUEDir(b3Body_GetLinearVelocity(Particles[Index].Body)) * Box3D::MetersToUE
+		: FVector::ZeroVector;
+}
+
+void ABox3DLiquidSourceActor::AddForceToParticle(int32 Index, FVector ForceNewtons, bool bWake)
+{
+	if (Particles.IsValidIndex(Index))
+	{
+		b3Body_ApplyForceToCenter(Particles[Index].Body, Box3D::ToB3Dir(ForceNewtons), bWake);
+	}
+}
+
+bool ABox3DLiquidSourceActor::ConsumeParticle(int32 Index, float ShrinkSeconds)
+{
+	if (!Particles.IsValidIndex(Index) || Particles[Index].ConsumeSeconds > 0.0f)
+	{
+		return false;
+	}
+	// Even "instant" gets a tiny window: the destroy always happens on the next
+	// fixed step, so caller loops never see indices shift under them.
+	Particles[Index].ConsumeSeconds = FMath::Max(ShrinkSeconds, UE_KINDA_SMALL_NUMBER);
+	Particles[Index].ConsumeAge = 0.0f;
+	return true;
 }
 
 void ABox3DLiquidSourceActor::DestroyParticle(int32 Index)
@@ -273,29 +314,34 @@ void ABox3DLiquidSourceActor::AgeAndDespawn(float FixedDeltaTime)
 	{
 		FLiquidParticle& Particle = Particles[Index];
 		Particle.Age += FixedDeltaTime;
+		if (Particle.ConsumeSeconds > 0.0f)
+		{
+			Particle.ConsumeAge += FixedDeltaTime;
+		}
 
 		if (b3Body_GetPosition(Particle.Body).z < KillZMeters)
 		{
 			DestroyParticle(Index);
 			continue;
 		}
-		if (ParticleLifetime <= 0.0f || Particle.Age <= ParticleLifetime)
-		{
-			continue;
-		}
 
-		const float Scale = ParticleScale(Particle.Age);
+		// Scale only reaches 0 through an expired lifetime or a finished consume.
+		const float Scale = ParticleScale(Particle);
 		if (Scale <= 0.0f)
 		{
 			DestroyParticle(Index);
 			continue;
 		}
-		// Shrink the physical sphere too, so drying particles slip out from
-		// under the pile instead of leaving invisible full-size bumps.
-		b3Sphere Sphere;
-		Sphere.center = b3Vec3{ 0.0f, 0.0f, 0.0f };
-		Sphere.radius = FMath::Max(Scale, MinShrinkFraction) * ParticleRadius * Box3D::UEToMeters;
-		b3Shape_SetSphere(Particle.Shape, &Sphere);
+		if (Scale < 1.0f)
+		{
+			// Shrink the physical sphere too, so drying/swallowed particles
+			// slip out from under the pile instead of leaving invisible
+			// full-size bumps.
+			b3Sphere Sphere;
+			Sphere.center = b3Vec3{ 0.0f, 0.0f, 0.0f };
+			Sphere.radius = FMath::Max(Scale, MinShrinkFraction) * ParticleRadius * Box3D::UEToMeters;
+			b3Shape_SetSphere(Particle.Shape, &Sphere);
+		}
 	}
 }
 
@@ -439,7 +485,8 @@ void ABox3DLiquidSourceActor::Tick(float DeltaSeconds)
 			const FVector Position = Box3D::ToUEPos(b3Body_GetPosition(Particle.Body));
 			Particle.P0 = bConsecutive ? Particle.P1 : Position;
 			Particle.P1 = Position;
-			bAllAsleep &= !b3Body_IsAwake(Particle.Body);
+			// A sleeping particle mid-swallow still animates its shrink.
+			bAllAsleep &= !b3Body_IsAwake(Particle.Body) && Particle.ConsumeSeconds <= 0.0f;
 		}
 		LastVisualStep = Step;
 	}
@@ -494,7 +541,7 @@ void ABox3DLiquidSourceActor::UpdateVisual()
 		InstanceTransforms[Index] = FTransform(
 			FQuat::Identity,
 			FMath::Lerp(Particle.P0, Particle.P1, Alpha),
-			FVector(BaseScale * ParticleScale(Particle.Age)));
+			FVector(BaseScale * ParticleScale(Particle)));
 		// Custom data 0: normalized age for material effects (foam, fade-out).
 		ParticleMeshes->SetCustomDataValue(Index, 0,
 			ParticleLifetime > 0.0f ? FMath::Clamp(Particle.Age / ParticleLifetime, 0.0f, 1.0f) : 0.0f,

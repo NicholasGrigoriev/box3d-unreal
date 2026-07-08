@@ -88,6 +88,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Particles", meta = (ClampMin = "0"))
 	float LinearDamping = 0.05f;
 
+	/// Gravity multiplier per particle: 1 = water, lower floats like foam,
+	/// 0 = weightless blobs.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Particles", meta = (ClampMin = "0", ClampMax = "8"))
+	float GravityScale = 1.0f;
+
 	/// Collision filter for every particle. Default: Debris vs everything.
 	/// Self-collision must stay on — the particles ARE the liquid volume.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Particles")
@@ -186,6 +191,31 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Liquid")
 	TArray<FVector> GetParticleLocations() const;
 
+	/// Live world-space center of one particle (cm).
+	UFUNCTION(BlueprintPure, Category = "Liquid")
+	FVector GetParticleLocation(int32 Index) const;
+
+	/// Live velocity of one particle (cm/s).
+	UFUNCTION(BlueprintPure, Category = "Liquid")
+	FVector GetParticleVelocity(int32 Index) const;
+
+	/// Mass of one full-size particle in kg (0 until the first spawn).
+	UFUNCTION(BlueprintPure, Category = "Liquid")
+	float GetParticleMassKg() const { return ParticleMassKg; }
+
+	/// Continuous force in Newtons on one particle — drains, currents,
+	/// attractors. Call during the fixed step (OnPreStep) or the force
+	/// under- or over-doses with frame rate.
+	UFUNCTION(BlueprintCallable, Category = "Liquid")
+	void AddForceToParticle(int32 Index, FVector ForceNewtons, bool bWake = true);
+
+	/// Swallow one particle: it shrinks out over ShrinkSeconds and despawns.
+	/// Never removes it inside this call (indices stay valid for the caller's
+	/// loop); the actual destroy happens on the next fixed step. Returns false
+	/// for invalid indices or particles already being consumed.
+	UFUNCTION(BlueprintCallable, Category = "Liquid")
+	bool ConsumeParticle(int32 Index, float ShrinkSeconds = 0.2f);
+
 	//~ AActor
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
@@ -207,17 +237,21 @@ private:
 	FVector NozzlePoint() const;
 	FVector NozzleVelocity() const;
 
-	/// 1 while alive, falling to 0 across the shrink window.
-	float ParticleScale(float Age) const;
-
 	struct FLiquidParticle
 	{
 		b3BodyId Body = {};
 		b3ShapeId Shape = {};
 		float Age = 0.0f;
+		/// > 0 while being consumed (drain swallow): shrink window and progress.
+		float ConsumeSeconds = 0.0f;
+		float ConsumeAge = 0.0f;
 		FVector P0 = FVector::ZeroVector;
 		FVector P1 = FVector::ZeroVector;
 	};
+
+	/// 1 while alive, falling to 0 across the lifetime-shrink and/or consume
+	/// window (whichever is smaller).
+	float ParticleScale(const FLiquidParticle& Particle) const;
 	TArray<FLiquidParticle> Particles;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Rendering", meta = (AllowPrivateAccess = "true"))

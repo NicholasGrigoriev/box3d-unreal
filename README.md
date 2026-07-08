@@ -51,8 +51,12 @@ spline-following, or vortex fields — `box3d.SpawnWind`), and
 self-colliding sphere particles with a fixed-step cohesion/viscosity pass so
 it pours, pools, and spreads; hard particle budget with oldest-recycling,
 lifetime with shrink-out despawn, instanced-mesh rendering with fixed-step
-interpolation — `box3d.SpawnLiquid`).
-All of it is pinned by a deterministic automation suite — 63 tests
+interpolation — `box3d.SpawnLiquid`) with its counterpart
+`ABox3DLiquidDrainActor` (a suction sink: radial pull with configurable
+strength/falloff, swallows particles reaching its core with a shrink-out,
+rate-limitable so a slow drain against a fast source overflows —
+`box3d.SpawnDrain`).
+All of it is pinned by a deterministic automation suite — 65 tests
 (`Automation RunTests Box3DUnreal`, see [docs/TESTING.md](docs/TESTING.md)).
 See [docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap,
 [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions, and
