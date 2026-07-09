@@ -128,6 +128,12 @@ bool FBox3DSoftBodyRopeWinchTest::RunTest(const FString& Parameters)
 	TestWorld.Step(240);
 	TestEqual(TEXT("Half-deployed rope hangs to half length"), Rope->GetEndLocation().Z, 240.0, 20.0);
 
+	// Floor quantization: a mid-link request must never deploy MORE chain than
+	// asked — extra links read as slack on a freshly connected grapple rope.
+	Rope->SetDeployedLength(170.0f);
+	TestTrue(TEXT("Quantization never deploys past the requested length"),
+		Rope->GetDeployedLength() <= 170.0f + UE_KINDA_SMALL_NUMBER);
+
 	// Pay back out: b3Body_Disable only deactivated the chain joints, so the
 	// revived tail must hang connected — a snapped chain would free-fall away.
 	Rope->SetDeployedLength(320.0f);
