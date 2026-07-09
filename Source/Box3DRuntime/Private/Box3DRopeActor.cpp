@@ -495,7 +495,9 @@ void ABox3DRopeActor::SetDeployedLength(float LengthCm)
 	{
 		return;
 	}
-	const int32 NewActive = FMath::Clamp(FMath::CeilToInt(LengthCm / SegmentLength), 1, Bodies.Num());
+	// Nearest link, not ceil: always-longer quantization left grapple ropes
+	// visibly slack at connect.
+	const int32 NewActive = FMath::Clamp(FMath::RoundToInt(LengthCm / SegmentLength), 1, Bodies.Num());
 	if (NewActive == ActiveSegments)
 	{
 		return;
