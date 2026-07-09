@@ -444,7 +444,7 @@ bool ABox3DRopeActor::AttachActorToEnd(AActor* ActorToAttach)
 	return AttachBodyToEnd(Other);
 }
 
-bool ABox3DRopeActor::AttachBodyToEnd(UBox3DBodyComponent* Body)
+bool ABox3DRopeActor::AttachBodyToEnd(UBox3DBodyComponent* Body, bool bSnapToBodyOrigin)
 {
 	if (ActiveSegments <= 0 || Body == nullptr || !Body->IsSimulating())
 	{
@@ -457,7 +457,11 @@ bool ABox3DRopeActor::AttachBodyToEnd(UBox3DBodyComponent* Body)
 	const b3WorldTransform OtherTransform = b3Body_GetTransform(Body->GetBodyId());
 	const FTransform OtherWorld(Box3D::ToUE(OtherTransform.q), Box3D::ToUEPos(OtherTransform.p));
 	EndAttachBodyId = Body->GetBodyId();
-	EndAttachLocalPoint = OtherWorld.InverseTransformPosition(GetEndLocation());
+	// Capturing the current offset keeps a hanging load where it is; snapping
+	// to the origin instead lets a pre-shortened chain come up taut.
+	EndAttachLocalPoint = bSnapToBodyOrigin
+		? FVector::ZeroVector
+		: OtherWorld.InverseTransformPosition(GetEndLocation());
 	CreateEndAttachJoint();
 	return b3Joint_IsValid(EndAttachJointId);
 }
@@ -522,6 +526,19 @@ void ABox3DRopeActor::SetDeployedLength(float LengthCm)
 			}
 		}
 		ActiveSegments = NewActive;
+
+		// Park the whole spool at the live end tip: disabled links keep their
+		// last transform, and a tail frozen mid-air where it was cut reads as
+		// a ghost rope hanging in the world (debug draw shows disabled bodies).
+		// Payout re-places each link at the tip before re-enabling it anyway.
+		const b3WorldTransform EndT = b3Body_GetTransform(Bodies[ActiveSegments - 1]);
+		for (int32 Index = ActiveSegments; Index < Bodies.Num(); ++Index)
+		{
+			if (b3Body_IsValid(Bodies[Index]))
+			{
+				b3Body_SetTransform(Bodies[Index], EndT.p, EndT.q);
+			}
+		}
 	}
 	else
 	{

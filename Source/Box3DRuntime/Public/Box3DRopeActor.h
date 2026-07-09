@@ -132,8 +132,12 @@ public:
 
 	/// AttachActorToEnd's component form: tie a specific live body to the rope
 	/// end. The attachment survives SetDeployedLength re-rigging.
+	/// bSnapToBodyOrigin ties the rope end to the body's ORIGIN instead of
+	/// capturing the current offset between them: a chain reeled shorter than
+	/// the gap is then immediately under tension, and the tie point does not
+	/// orbit the body as it rotates.
 	UFUNCTION(BlueprintCallable, Category = "Rope")
-	bool AttachBodyToEnd(UBox3DBodyComponent* Body);
+	bool AttachBodyToEnd(UBox3DBodyComponent* Body, bool bSnapToBodyOrigin = false);
 
 	/// Release whatever AttachActorToEnd tied on.
 	UFUNCTION(BlueprintCallable, Category = "Rope")
