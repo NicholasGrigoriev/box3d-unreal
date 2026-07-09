@@ -55,7 +55,7 @@ void ABox3DRopeActor::OnConstruction(const FTransform& Transform)
 	BuildSkin();
 
 	const FVector Start = GetActorLocation();
-	FVector Dir = FVector::DownVector;
+	FVector Dir = BuildDirection.GetSafeNormal(UE_SMALL_NUMBER, FVector::DownVector);
 	if (bPinEnd)
 	{
 		Dir = (GetActorTransform().TransformPosition(EndPinLocation) - Start)
@@ -162,7 +162,7 @@ void ABox3DRopeActor::BuildRope()
 	const float HalfLen = SegmentLength * 0.5f;
 
 	const FVector Start = GetActorLocation();
-	FVector Dir = FVector::DownVector;
+	FVector Dir = BuildDirection.GetSafeNormal(UE_SMALL_NUMBER, FVector::DownVector);
 	if (bPinEnd)
 	{
 		Dir = (GetActorTransform().TransformPosition(EndPinLocation) - Start)
@@ -190,7 +190,9 @@ void ABox3DRopeActor::BuildRope()
 		b3ShapeDef ShapeDef = b3DefaultShapeDef();
 		ShapeDef.density = FMath::Max(Density, 1.0f);
 		ShapeDef.filter.categoryBits = 1ull << static_cast<int32>(EBox3DChannel::Debris);
-		ShapeDef.filter.maskBits = UINT64_MAX;
+		ShapeDef.filter.maskBits = bCollideWithPawns
+			? UINT64_MAX
+			: UINT64_MAX & ~(1ull << static_cast<int32>(EBox3DChannel::Pawn));
 		ShapeDef.filter.groupIndex = SelfGroup;
 
 		// Adjacent links overlap at the joint pivots; the negative group keeps
@@ -234,6 +236,8 @@ void ABox3DRopeActor::BuildRope()
 		MakeLink(EndPinBodyId, Bodies.Last(), FVector::ZeroVector, FVector(0.0, 0.0, +HalfLen));
 	}
 
+	ActiveSegments = Count;
+
 	Interp.SetNum(Count);
 	for (int32 Index = 0; Index < Count; ++Index)
 	{
@@ -267,9 +271,11 @@ void ABox3DRopeActor::DestroyRope()
 		b3DestroyBody(EndPinBodyId);
 	}
 	EndPinBodyId = b3BodyId{};
+	EndAttachBodyId = b3BodyId{};
 	LinkJoints.Empty();
 	bChainBroken = false;
 	Interp.Empty();
+	ActiveSegments = 0;
 }
 
 void ABox3DRopeActor::Tick(float DeltaSeconds)
@@ -337,7 +343,7 @@ void ABox3DRopeActor::UpdateRopeVisual()
 		// pose; snap that segment instead of interpolating across the gap.
 		const bool bConsecutive = Step == LastStep + 1;
 		bAllAsleep = true;
-		for (int32 Index = 0; Index < Bodies.Num(); ++Index)
+		for (int32 Index = 0; Index < ActiveSegments; ++Index)
 		{
 			const b3WorldTransform T = b3Body_GetTransform(Bodies[Index]);
 			FBodyInterp& Segment = Interp[Index];
@@ -356,7 +362,8 @@ void ABox3DRopeActor::UpdateRopeVisual()
 
 	const float Alpha = Subsystem->GetFixedStepAlpha();
 	const float HalfLen = SegmentLength * 0.5f;
-	const int32 Count = Bodies.Num();
+	// Spooled tail links (beyond ActiveSegments) are disabled and hidden.
+	const int32 Count = ActiveSegments;
 
 	TArray<FVector, TInlineAllocator<65>> Positions;
 	TArray<FQuat, TInlineAllocator<65>> Rotations;
@@ -408,11 +415,11 @@ void ABox3DRopeActor::UpdateRopeVisual()
 
 FVector ABox3DRopeActor::GetEndLocation() const
 {
-	if (Bodies.Num() == 0 || !b3Body_IsValid(Bodies.Last()))
+	if (ActiveSegments <= 0 || !b3Body_IsValid(Bodies[ActiveSegments - 1]))
 	{
 		return GetActorLocation();
 	}
-	const b3WorldTransform T = b3Body_GetTransform(Bodies.Last());
+	const b3WorldTransform T = b3Body_GetTransform(Bodies[ActiveSegments - 1]);
 	return Box3D::ToUEPos(T.p) + Box3D::ToUE(T.q).RotateVector(FVector(0.0, 0.0, SegmentLength * 0.5f));
 }
 
@@ -427,27 +434,48 @@ FVector ABox3DRopeActor::GetSegmentLocation(int32 SegmentIndex) const
 
 bool ABox3DRopeActor::AttachActorToEnd(AActor* ActorToAttach)
 {
-	UBox3DWorldSubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UBox3DWorldSubsystem>() : nullptr;
 	UBox3DBodyComponent* Other = ActorToAttach ? ActorToAttach->FindComponentByClass<UBox3DBodyComponent>() : nullptr;
-	if (Subsystem == nullptr || Bodies.Num() == 0 || Other == nullptr || !Other->IsSimulating())
+	if (Other == nullptr)
 	{
 		UE_LOG(LogBox3D, Warning, TEXT("%s: AttachActorToEnd needs a live UBox3DBodyComponent on %s"),
 			*GetPathName(), *GetNameSafe(ActorToAttach));
 		return false;
 	}
+	return AttachBodyToEnd(Other);
+}
+
+bool ABox3DRopeActor::AttachBodyToEnd(UBox3DBodyComponent* Body)
+{
+	if (ActiveSegments <= 0 || Body == nullptr || !Body->IsSimulating())
+	{
+		UE_LOG(LogBox3D, Warning, TEXT("%s: AttachBodyToEnd needs a built rope and a live body (%s)"),
+			*GetPathName(), *GetNameSafe(Body));
+		return false;
+	}
 	DetachEnd();
 
-	const b3WorldTransform OtherTransform = b3Body_GetTransform(Other->GetBodyId());
+	const b3WorldTransform OtherTransform = b3Body_GetTransform(Body->GetBodyId());
 	const FTransform OtherWorld(Box3D::ToUE(OtherTransform.q), Box3D::ToUEPos(OtherTransform.p));
+	EndAttachBodyId = Body->GetBodyId();
+	EndAttachLocalPoint = OtherWorld.InverseTransformPosition(GetEndLocation());
+	CreateEndAttachJoint();
+	return b3Joint_IsValid(EndAttachJointId);
+}
 
+void ABox3DRopeActor::CreateEndAttachJoint()
+{
+	UBox3DWorldSubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UBox3DWorldSubsystem>() : nullptr;
+	if (Subsystem == nullptr || ActiveSegments <= 0 || !b3Body_IsValid(EndAttachBodyId))
+	{
+		return;
+	}
 	b3SphericalJointDef Def = b3DefaultSphericalJointDef();
-	Def.base.bodyIdA = Bodies.Last();
-	Def.base.bodyIdB = Other->GetBodyId();
+	Def.base.bodyIdA = Bodies[ActiveSegments - 1];
+	Def.base.bodyIdB = EndAttachBodyId;
 	Def.base.localFrameA = b3Transform{ Box3D::ToB3(FVector(0.0, 0.0, SegmentLength * 0.5f)), Box3D::IdentityQuat };
-	Def.base.localFrameB = b3Transform{ Box3D::ToB3(OtherWorld.InverseTransformPosition(GetEndLocation())), Box3D::IdentityQuat };
+	Def.base.localFrameB = b3Transform{ Box3D::ToB3(EndAttachLocalPoint), Box3D::IdentityQuat };
 	EndAttachJointId = b3CreateSphericalJoint(Subsystem->GetBox3DWorldId(), &Def);
 	b3Joint_WakeBodies(EndAttachJointId);
-	return true;
 }
 
 void ABox3DRopeActor::DetachEnd()
@@ -457,13 +485,107 @@ void ABox3DRopeActor::DetachEnd()
 		b3DestroyJoint(EndAttachJointId, /*wakeAttached*/ true);
 	}
 	EndAttachJointId = b3JointId{};
+	EndAttachBodyId = b3BodyId{};
+}
+
+void ABox3DRopeActor::SetDeployedLength(float LengthCm)
+{
+	// A cut chain has no single deployed length left to re-rig.
+	if (Bodies.Num() == 0 || bChainBroken || SegmentLength <= 0.0f)
+	{
+		return;
+	}
+	const int32 NewActive = FMath::Clamp(FMath::CeilToInt(LengthCm / SegmentLength), 1, Bodies.Num());
+	if (NewActive == ActiveSegments)
+	{
+		return;
+	}
+
+	// The end joint is tied to the end link, which is about to change identity.
+	const bool bReattach = b3Joint_IsValid(EndAttachJointId);
+	if (bReattach)
+	{
+		b3DestroyJoint(EndAttachJointId, /*wakeAttached*/ true);
+		EndAttachJointId = b3JointId{};
+	}
+
+	if (NewActive < ActiveSegments)
+	{
+		// Reel in: spool tail links into the winch.
+		for (int32 Index = NewActive; Index < ActiveSegments; ++Index)
+		{
+			if (b3Body_IsValid(Bodies[Index]))
+			{
+				b3Body_Disable(Bodies[Index]);
+			}
+		}
+		ActiveSegments = NewActive;
+	}
+	else
+	{
+		// Pay out: feed links back one at a time at the current end tip so they
+		// unspool from the winch instead of teleporting in from where they parked.
+		// Their chain joints were only deactivated by b3Body_Disable and revive
+		// with the body.
+		while (ActiveSegments < NewActive)
+		{
+			const b3BodyId Next = Bodies[ActiveSegments];
+			if (!b3Body_IsValid(Next))
+			{
+				break;
+			}
+			const b3WorldTransform PrevT = b3Body_GetTransform(Bodies[ActiveSegments - 1]);
+			const FQuat PrevRot = Box3D::ToUE(PrevT.q);
+			const FVector NextCenter = Box3D::ToUEPos(PrevT.p) + PrevRot.RotateVector(FVector(0.0, 0.0, SegmentLength));
+			b3Body_SetTransform(Next, Box3D::ToB3Pos(NextCenter), PrevT.q);
+			b3Body_Enable(Next);
+			if (Interp.IsValidIndex(ActiveSegments))
+			{
+				Interp[ActiveSegments].P0 = Interp[ActiveSegments].P1 = NextCenter;
+				Interp[ActiveSegments].Q0 = Interp[ActiveSegments].Q1 = PrevRot;
+			}
+			++ActiveSegments;
+		}
+	}
+
+	if (bReattach)
+	{
+		CreateEndAttachJoint();
+	}
+	for (int32 Index = 0; Index < SegmentMeshes.Num(); ++Index)
+	{
+		if (SegmentMeshes[Index] != nullptr)
+		{
+			SegmentMeshes[Index]->SetVisibility(Index < ActiveSegments);
+		}
+	}
+	bAllAsleep = false;
+}
+
+float ABox3DRopeActor::GetDeployedLength() const
+{
+	return ActiveSegments * SegmentLength;
+}
+
+FVector ABox3DRopeActor::GetEndConstraintForce() const
+{
+	if (!b3Joint_IsValid(EndAttachJointId))
+	{
+		return FVector::ZeroVector;
+	}
+	return Box3D::ToUEDir(b3Joint_GetConstraintForce(EndAttachJointId));
+}
+
+bool ABox3DRopeActor::HasEndAttachment() const
+{
+	return b3Joint_IsValid(EndAttachJointId);
 }
 
 void ABox3DRopeActor::AddImpulseAtEnd(FVector Impulse)
 {
-	if (Bodies.Num() > 0 && b3Body_IsValid(Bodies.Last()))
+	if (ActiveSegments > 0 && b3Body_IsValid(Bodies[ActiveSegments - 1]))
 	{
-		b3Body_ApplyLinearImpulse(Bodies.Last(), Box3D::ToB3Dir(Impulse * Box3D::UEToMeters),
+		b3Body_ApplyLinearImpulse(Bodies[ActiveSegments - 1], Box3D::ToB3Dir(Impulse * Box3D::UEToMeters),
 			Box3D::ToB3Pos(GetEndLocation()), /*wake*/ true);
 	}
 }

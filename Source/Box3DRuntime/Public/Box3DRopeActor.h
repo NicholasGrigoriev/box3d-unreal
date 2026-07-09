@@ -58,6 +58,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope", meta = (ClampMin = "0"))
 	float AngularDamping = 0.5f;
 
+	/// Direction the chain is laid out along at build time when the end is not
+	/// pinned (grapple ropes build toward their holder instead of hanging down).
+	/// Normalized at use; zero falls back to straight down.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope")
+	FVector BuildDirection = FVector(0.0, 0.0, -1.0);
+
+	/// Links collide with pawn proxies (default). Grapple ropes turn this off so
+	/// the chain cannot tangle on the character holding it.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope")
+	bool bCollideWithPawns = true;
+
 	/// Pin the far end to EndPinLocation with a static anchor (clothesline,
 	/// power cable). Unpinned ropes hang free.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Rope")
@@ -119,9 +130,39 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	bool AttachActorToEnd(AActor* ActorToAttach);
 
+	/// AttachActorToEnd's component form: tie a specific live body to the rope
+	/// end. The attachment survives SetDeployedLength re-rigging.
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	bool AttachBodyToEnd(UBox3DBodyComponent* Body);
+
 	/// Release whatever AttachActorToEnd tied on.
 	UFUNCTION(BlueprintCallable, Category = "Rope")
 	void DetachEnd();
+
+	/// Winch API: set how much rope is paid out, quantized to whole segments and
+	/// clamped to [one segment, RopeLength]. Reeling in spools tail links into a
+	/// disabled, hidden reserve; paying out feeds them back in at the end tip.
+	/// The end attachment, if any, is re-tied to the new end link. No-op on a
+	/// cut chain.
+	UFUNCTION(BlueprintCallable, Category = "Rope")
+	void SetDeployedLength(float LengthCm);
+
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	float GetDeployedLength() const;
+
+	/// Constraint force (newtons, world space) currently carried by the end
+	/// attachment joint — a load hanging off the end reads roughly its weight
+	/// (~10 N per kg). Zero when nothing is attached. This is the winch's
+	/// tension signal for grapple coupling.
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	FVector GetEndConstraintForce() const;
+
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	bool HasEndAttachment() const;
+
+	/// Links currently simulating (the rest are spooled by SetDeployedLength).
+	UFUNCTION(BlueprintPure, Category = "Rope")
+	int32 GetActiveSegmentCount() const { return ActiveSegments; }
 
 	/// Kick the rope at its free end (impulse in kg*cm/s).
 	UFUNCTION(BlueprintCallable, Category = "Rope")
@@ -161,9 +202,17 @@ private:
 	UPROPERTY()
 	TArray<TObjectPtr<USplineMeshComponent>> SegmentMeshes;
 
+	void CreateEndAttachJoint();
+
 	TArray<b3BodyId> Bodies;
 	b3BodyId EndPinBodyId = {};
 	b3JointId EndAttachJointId = {};
+	b3BodyId EndAttachBodyId = {};
+	/// Attachment point in the attached body's local space, captured once by
+	/// AttachBodyToEnd and reused when re-tying after a deployed-length change.
+	FVector EndAttachLocalPoint = FVector::ZeroVector;
+	/// Links currently simulating; Bodies[ActiveSegments..] are spooled (disabled).
+	int32 ActiveSegments = 0;
 
 	struct FRopeLink
 	{

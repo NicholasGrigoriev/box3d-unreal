@@ -40,8 +40,11 @@ interpolation between fixed steps (`bInterpolateBodyTransforms`) for
 high-refresh displays.
 Soft-body actors built from raw bodies behind purely visual skins:
 `ABox3DRopeActor` (capsule chain + spherical joints, rendered as spline meshes;
-pin the far end, `AttachActorToEnd` at runtime, or snap it via `LinkBreakForce`
-/ `CutLink`) and `ABox3DClothActor` (sphere-particle lattice + distance-joint
+pin the far end, `AttachActorToEnd`/`AttachBodyToEnd` at runtime, or snap it via
+`LinkBreakForce` / `CutLink`; winch support for grapples — `SetDeployedLength`
+spools links in and out, `GetEndConstraintForce` reads the end-joint tension,
+`BuildDirection` lays the chain toward its holder, and `bCollideWithPawns`
+keeps it off the character carrying it) and `ABox3DClothActor` (sphere-particle lattice + distance-joint
 stitching, rendered as a double-sided procedural mesh with per-frame normals,
 material hot-swappable) — both interpolate between fixed steps, preview their
 rest shape in the editor, and spawn at the crosshair via `box3d.SpawnRope` /
@@ -51,7 +54,7 @@ meshes become welded chunks that shatter past a break force —
 velocity drags resting bodies), and `ABox3DWindActor` (per-fixed-step drag
 forces via the subsystem's `OnPreStep` hook; directional, turbulence,
 spline-following, or vortex fields — `box3d.SpawnWind`).
-All of it is pinned by a deterministic automation suite — 62 tests
+All of it is pinned by a deterministic automation suite — 65 tests
 (`Automation RunTests Box3DUnreal`, see [docs/TESTING.md](docs/TESTING.md)).
 See [docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap,
 [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions, and
@@ -64,7 +67,7 @@ Requires UE 5.7, C++ project.
 
 ## Tests
 
-40 automation tests cover conversion math, world stepping, body components, queries,
+65 automation tests cover conversion math, world stepping, body components, queries,
 mesh cooking, joints, gameplay events, threading, diagnostics, replay determinism,
 explosions, and continuous collision with analytic assertions
 ([docs/TESTING.md](docs/TESTING.md)):

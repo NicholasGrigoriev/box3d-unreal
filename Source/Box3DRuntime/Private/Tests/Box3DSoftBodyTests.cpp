@@ -8,6 +8,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Box3DClothActor.h"
+#include "Box3DConversion.h"
 #include "Box3DRopeActor.h"
 #include "Components/SplineMeshComponent.h"
 #include "ProceduralMeshComponent.h"
@@ -103,6 +104,123 @@ bool FBox3DSoftBodyRopeCutsTest::RunTest(const FString& Parameters)
 	TestWorld.Step(1);
 	Rope->PollLinkBreaks();
 	TestTrue(TEXT("Overloaded links snap via LinkBreakForce"), Rope->GetLiveLinkCount() < 7);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DSoftBodyRopeWinchTest,
+	"Box3DUnreal.SoftBody.RopeWinchesDeployedLength", BOX3D_TEST_FLAGS)
+bool FBox3DSoftBodyRopeWinchTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld TestWorld;
+
+	const FTransform Transform(FQuat::Identity, FVector(0.0, 0.0, 400.0));
+	ABox3DRopeActor* Rope = TestWorld.World->SpawnActorDeferred<ABox3DRopeActor>(
+		ABox3DRopeActor::StaticClass(), Transform);
+	Rope->RopeLength = 320.0f;
+	Rope->NumSegments = 16;
+	Rope->FinishSpawning(Transform);
+
+	TestEqual(TEXT("A fresh rope is fully paid out"), Rope->GetDeployedLength(), 320.0f, 1.0f);
+
+	// Reel in half: the spooled tail disables, the live end hangs at half length.
+	Rope->SetDeployedLength(160.0f);
+	TestEqual(TEXT("Reeling quantizes to whole segments"), Rope->GetDeployedLength(), 160.0f, 20.0f);
+	TestWorld.Step(240);
+	TestEqual(TEXT("Half-deployed rope hangs to half length"), Rope->GetEndLocation().Z, 240.0, 20.0);
+
+	// Pay back out: b3Body_Disable only deactivated the chain joints, so the
+	// revived tail must hang connected — a snapped chain would free-fall away.
+	Rope->SetDeployedLength(320.0f);
+	TestEqual(TEXT("Payout restores the full length"), Rope->GetDeployedLength(), 320.0f, 1.0f);
+	TestWorld.Step(300);
+	TestEqual(TEXT("Re-deployed rope hangs connected to full length"),
+		Rope->GetEndLocation().Z, 80.0, 25.0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DSoftBodyRopeTensionTest,
+	"Box3DUnreal.SoftBody.RopeEndTensionReadsHangingLoad", BOX3D_TEST_FLAGS)
+bool FBox3DSoftBodyRopeTensionTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld TestWorld;
+
+	const FTransform Transform(FQuat::Identity, FVector(0.0, 0.0, 300.0));
+	ABox3DRopeActor* Rope = TestWorld.World->SpawnActorDeferred<ABox3DRopeActor>(
+		ABox3DRopeActor::StaticClass(), Transform);
+	Rope->RopeLength = 200.0f;
+	Rope->NumSegments = 8;
+	Rope->FinishSpawning(Transform);
+
+	// 50 cm cube at density 80 = 10 kg, hung just below the rope end (Z = 100).
+	UBox3DBodyComponent* Load = Box3DTest::SpawnBody(TestWorld.World, FVector(0.0, 0.0, 70.0),
+		[](UBox3DBodyComponent& Body)
+		{
+			Body.ShapeType = EBox3DShapeType::Box;
+			Body.BoxHalfExtent = FVector(25.0);
+			Body.Density = 80.0f;
+		});
+	TestEqual(TEXT("Load weighs 10 kg"), Load->GetMass(), 10.0f, 0.5f);
+
+	TestTrue(TEXT("Load attaches to the rope end"), Rope->AttachBodyToEnd(Load));
+	TestTrue(TEXT("End attachment registers"), Rope->HasEndAttachment());
+
+	TestWorld.Step(600);
+
+	TestTrue(TEXT("Load hangs instead of falling"), Load->GetComponentLocation().Z > -50.0);
+	const FVector Tension = Rope->GetEndConstraintForce();
+	TestEqual(TEXT("End joint carries the load's weight (~98 N)"),
+		static_cast<float>(Tension.Size()), 98.0f, 25.0f);
+	TestTrue(TEXT("Tension is carried vertically"),
+		FMath::Abs(Tension.Z) > Tension.Size() * 0.9);
+	return true;
+}
+
+namespace
+{
+	struct FRopeFilterScan
+	{
+		bool bFoundRopeShape = false;
+		bool bAnyPawnMask = false;
+	};
+
+	bool CollectRopeFilters(b3ShapeId ShapeId, void* Context)
+	{
+		FRopeFilterScan* Scan = static_cast<FRopeFilterScan*>(Context);
+		const b3Filter Filter = b3Shape_GetFilter(ShapeId);
+		if (Filter.categoryBits & (1ull << static_cast<int32>(EBox3DChannel::Debris)))
+		{
+			Scan->bFoundRopeShape = true;
+			Scan->bAnyPawnMask |= (Filter.maskBits & (1ull << static_cast<int32>(EBox3DChannel::Pawn))) != 0;
+		}
+		return true;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DSoftBodyRopeBuildDirectionTest,
+	"Box3DUnreal.SoftBody.RopeBuildsAlongDirectionWithoutPawnCollision", BOX3D_TEST_FLAGS)
+bool FBox3DSoftBodyRopeBuildDirectionTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld TestWorld;
+
+	const FTransform Transform(FQuat::Identity, FVector(0.0, 0.0, 300.0));
+	ABox3DRopeActor* Rope = TestWorld.World->SpawnActorDeferred<ABox3DRopeActor>(
+		ABox3DRopeActor::StaticClass(), Transform);
+	Rope->RopeLength = 200.0f;
+	Rope->NumSegments = 8;
+	Rope->BuildDirection = FVector(1.0, 0.0, 0.0);
+	Rope->bCollideWithPawns = false;
+	Rope->FinishSpawning(Transform);
+
+	// Before any step: the chain lies exactly along the build direction.
+	const FVector End = Rope->GetEndLocation();
+	TestEqual(TEXT("Chain builds along +X"), End.X, 200.0, 2.0);
+	TestEqual(TEXT("Chain stays level at build"), End.Z, 300.0, 2.0);
+
+	FRopeFilterScan Scan;
+	const b3AABB Bounds{ Box3D::ToB3(FVector(-50.0, -50.0, 250.0)), Box3D::ToB3(FVector(250.0, 50.0, 350.0)) };
+	b3World_OverlapAABB(TestWorld.B3World(), Bounds, b3DefaultQueryFilter(), &CollectRopeFilters, &Scan);
+	TestTrue(TEXT("Overlap sweep found the rope shapes"), Scan.bFoundRopeShape);
+	TestFalse(TEXT("bCollideWithPawns=false strips the pawn mask bit"), Scan.bAnyPawnMask);
 	return true;
 }
 
