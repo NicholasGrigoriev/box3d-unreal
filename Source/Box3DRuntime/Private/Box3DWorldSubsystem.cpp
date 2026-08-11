@@ -1,6 +1,8 @@
 #include "Box3DWorldSubsystem.h"
 
+#include "Box3DBakedGeometry.h"
 #include "Box3DBodyComponent.h"
+#include "Box3DCollisionData.h"
 #include "Box3DConversion.h"
 #include "Box3DDebugDraw.h"
 #include "Box3DJointComponent.h"
@@ -14,7 +16,9 @@
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/FileManager.h"
+#include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "UObject/SoftObjectPath.h"
 #include "box3d/box3d.h"
 #include "box3d/collision.h"
 
@@ -43,6 +47,21 @@ void UBox3DWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Super::Initialize(Collection);
 
 	const UBox3DSettings* Settings = GetDefault<UBox3DSettings>();
+
+	// Authority gating: with bAuthorityOnlySimulation, pure clients get no Box3D
+	// world at all. Body components and queries already no-op on an invalid world.
+	if (Settings->bAuthorityOnlySimulation)
+	{
+		const UWorld* World = GetWorld();
+		bSimulationAuthority = World == nullptr || World->GetNetMode() != NM_Client;
+		if (!bSimulationAuthority)
+		{
+			UE_LOG(LogBox3D, Log,
+				TEXT("Box3D world skipped for %s: net client with bAuthorityOnlySimulation"),
+				*GetNameSafe(GetWorld()));
+			return;
+		}
+	}
 
 	b3WorldDef Def = b3DefaultWorldDef();
 	Def.gravity = Box3D::ToB3Accel(Settings->Gravity);
@@ -104,6 +123,10 @@ void UBox3DWorldSubsystem::Deinitialize()
 	{
 		StaticMirror->Shutdown();
 	}
+	if (BakedScene.IsValid())
+	{
+		BakedScene->Destroy();
+	}
 
 	if (b3World_IsValid(WorldId))
 	{
@@ -122,6 +145,7 @@ void UBox3DWorldSubsystem::Deinitialize()
 	}
 	bRecordingActive = false;
 	StaticMirror.Reset();
+	BakedScene.Reset();
 	DebugDrawer.Reset();
 	TaskPool.Reset();
 
@@ -137,9 +161,25 @@ void UBox3DWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
 	Super::OnWorldBeginPlay(InWorld);
 
+	// Baked collision replaces the mirror's initial cook when it yields bodies;
+	// the mirror still covers levels streamed in after begin-play.
+	int32 BakedBodies = 0;
+	if (GetDefault<UBox3DSettings>()->bUseBakedStaticCollision)
+	{
+		BakedBodies = LoadBakedStaticGeometry();
+	}
+
 	if (StaticMirror.IsValid())
 	{
-		StaticMirror->MirrorInitialLevels();
+		if (BakedBodies > 0)
+		{
+			UE_LOG(LogBox3D, Log,
+				TEXT("Box3D mirror: initial cook skipped, %d baked bodies loaded instead"), BakedBodies);
+		}
+		else
+		{
+			StaticMirror->MirrorInitialLevels();
+		}
 	}
 
 	// After the mirror: converted props expect their static surroundings to exist.
@@ -147,6 +187,71 @@ void UBox3DWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	{
 		Box3D::ConvertSimulatedActors(&InWorld);
 	}
+}
+
+int32 UBox3DWorldSubsystem::LoadBakedStaticGeometry()
+{
+	if (!b3World_IsValid(WorldId))
+	{
+		return 0;
+	}
+	const UBox3DSettings* Settings = GetDefault<UBox3DSettings>();
+
+	TArray<UBox3DCollisionData*> Assets;
+	for (const TSoftObjectPtr<UBox3DCollisionData>& Soft : Settings->BakedCollisionAssets)
+	{
+		if (UBox3DCollisionData* Data = Soft.LoadSynchronous())
+		{
+			Assets.AddUnique(Data);
+		}
+	}
+
+	// BC_<MapName> beside the map, PIE prefix stripped so play-in-editor finds
+	// the same asset a packaged build would.
+	if (Settings->bAutoDiscoverBakedCollision)
+	{
+		const FString MapPackage = UWorld::RemovePIEPrefix(GetWorld()->GetOutermost()->GetName());
+		const FString BakedPackage = UBox3DCollisionData::DeriveAssetPackageName(MapPackage);
+		const FSoftObjectPath BakedPath(
+			FString::Printf(TEXT("%s.%s"), *BakedPackage, *FPackageName::GetShortName(BakedPackage)));
+		if (UBox3DCollisionData* Data = Cast<UBox3DCollisionData>(BakedPath.TryLoad()))
+		{
+			Assets.AddUnique(Data);
+		}
+	}
+
+	if (Assets.IsEmpty())
+	{
+		UE_LOG(LogBox3D, Warning,
+			TEXT("Box3D baked collision enabled but no assets found for %s — run the Box3DBake ")
+			TEXT("commandlet or list assets in Project Settings > Box3D"),
+			*GetNameSafe(GetWorld()));
+		return 0;
+	}
+
+	BakedScene = MakePimpl<FBox3DBakedScene>();
+	int32 Total = 0;
+	for (UBox3DCollisionData* Data : Assets)
+	{
+#if WITH_EDITOR
+		// A packaged build can't re-bake, so the staleness check runs where it can
+		// still be acted on (editor / PIE).
+		FString StaleReason;
+		if (Data->IsStale(StaleReason))
+		{
+			UE_LOG(LogBox3D, Warning,
+				TEXT("Box3D baked collision %s is stale (%s) — re-run the Box3DBake commandlet"),
+				*GetNameSafe(Data), *StaleReason);
+		}
+#endif
+		Total += BakedScene->Instantiate(WorldId, *Data);
+	}
+
+	if (Total > 0)
+	{
+		b3World_RebuildStaticTree(WorldId);
+	}
+	return Total;
 }
 
 void UBox3DWorldSubsystem::OnLevelAddedToWorld(ULevel* Level, UWorld* OwningWorld)

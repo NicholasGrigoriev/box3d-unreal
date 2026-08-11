@@ -62,6 +62,11 @@ public:
 	/// Print totals and per-level counts to the log (backs box3d.MirrorStats).
 	void LogStats() const;
 
+	/// Whether a component qualifies for mirroring under the current settings.
+	/// Static so the editor bake commandlet applies the exact same filter the
+	/// runtime would (docs/BAKED_COLLISION.md).
+	static bool ShouldMirror(const UStaticMeshComponent& Component);
+
 private:
 	struct FLevelEntry
 	{
@@ -82,8 +87,6 @@ private:
 		FObjectKey LevelKey;
 		TWeakObjectPtr<UStaticMeshComponent> Component;
 	};
-
-	bool ShouldMirror(const UStaticMeshComponent& Component) const;
 
 	/// Create the body/bodies for one component (N for ISM instances).
 	void MirrorComponent(UStaticMeshComponent& Component, FLevelEntry& Entry);

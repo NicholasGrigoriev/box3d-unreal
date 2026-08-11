@@ -181,7 +181,7 @@ void FBox3DStaticSceneMirror::DrainQueue(float BudgetMs)
 	PendingQueue.RemoveAt(0, Processed);
 }
 
-bool FBox3DStaticSceneMirror::ShouldMirror(const UStaticMeshComponent& Component) const
+bool FBox3DStaticSceneMirror::ShouldMirror(const UStaticMeshComponent& Component)
 {
 	const UBox3DSettings* Settings = GetDefault<UBox3DSettings>();
 

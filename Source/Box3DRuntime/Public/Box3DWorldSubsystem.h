@@ -8,6 +8,7 @@
 
 class UBox3DBodyComponent;
 class UBox3DJointComponent;
+class FBox3DBakedScene;
 class FBox3DUETaskPool;
 class FBox3DDebugDrawer;
 class FBox3DStaticSceneMirror;
@@ -99,6 +100,13 @@ public:
 
 	/// Number of fixed steps performed since world creation.
 	uint64 GetStepCount() const { return StepCount; }
+
+	/// True where Box3D simulates. Always true unless bAuthorityOnlySimulation is
+	/// enabled, in which case pure clients get no Box3D world at all — body
+	/// components stay inert and queries return empty there. Evaluated once at
+	/// subsystem initialization from the world's net mode.
+	UFUNCTION(BlueprintPure, Category = "Box3D|Networking")
+	bool IsSimulationAuthority() const { return bSimulationAuthority; }
 
 	/// Fraction [0, 1] of the way from the last fixed step to the next, for
 	/// interpolating raw-body visuals the way bInterpolateBodyTransforms
@@ -201,9 +209,15 @@ private:
 	/// CVar-gated b3World_Draw pass (box3d.DebugDraw) using DrawDebugHelpers.
 	void DrawDebugWorld() const;
 
+	/// Instantiate pre-baked static collision (settings-gated). Returns the number
+	/// of bodies created; > 0 makes OnWorldBeginPlay skip the mirror's initial
+	/// cook. See docs/BAKED_COLLISION.md.
+	int32 LoadBakedStaticGeometry();
+
 	b3WorldId WorldId = {};
 	float Accumulator = 0.0f;
 	uint64 StepCount = 0;
+	bool bSimulationAuthority = true;
 	FDelegateHandle LevelAddedHandle;
 
 	/// Bridges solver tasks onto UE worker threads (Settings: WorkerCount > 1 with
@@ -218,6 +232,10 @@ private:
 	/// Mirrors static level geometry into raw static bodies (settings-gated).
 	/// Shut down before the world dies; its bodies live in the b3 world.
 	TPimplPtr<FBox3DStaticSceneMirror> StaticMirror;
+
+	/// Bodies instantiated from baked collision assets (settings-gated). Destroyed
+	/// before the world dies, like the mirror.
+	TPimplPtr<FBox3DBakedScene> BakedScene;
 
 	/// Reusable recording buffer (box3d resets it on each StartRecording).
 	/// Destroyed after the world in Deinitialize; plain pointer because the C

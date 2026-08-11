@@ -77,6 +77,8 @@ deterministic. No latent commands, no wall-clock waits.
 | M6 replay | serial recording replayed at 4 workers: every per-step state hash matches (cross-thread determinism) | `Replay.CrossWorkerDeterminism` |
 | M6 world | explosion: dv = 3·I/(4·r·ρ) exact at full scale, half at falloff midpoint, zero beyond, no spin, mask filtering | `World.ExplosionImpulse` |
 | M6 world | 150 m/s bodies: continuous collision stops non-bullet vs static thin plate; bullet flag stops dynamic-vs-dynamic, momentum transferred | `World.ContinuousFastBody` |
+| Snapshot | ring capacity window + eviction, capture/restore roundtrip bit-identical (hash), body-count mismatch rejected | `Snapshot.RingCaptureRestore` |
+| Snapshot | reconcile: no-op on agreement, forced rollback replays bit-identically (contact-free), 1 m authoritative correction carried through replay, out-of-window refusal | `Snapshot.ReconcileAndReplay` |
 
 ## Known gaps (deliberate)
 
@@ -96,6 +98,13 @@ deterministic. No latent commands, no wall-clock waits.
   cylinder (no simple collision → render fallback) are covered.
 - **Landscape height fields, `b3CreateCompound`** — deferred features (see
   MILESTONES M3 notes); no tests until implemented.
+- **Contact-rich rollback replay** — not bit-identical by design (snapshots
+  exclude warm-start impulses; see `Box3DSnapshot.h`); only the contact-free
+  case is hash-pinned.
+- **`Box3DBake` commandlet** — editor-module commandlet needing real map
+  packages on disk; exercised manually (`-run=Box3DBake -Map=...`), while the
+  baked-asset loader shares its geometry path with the tested mirror/cooking
+  code.
 - **`stat box3d` display plumbing** — the SET_*_STAT macros are engine-side; the
   values feeding them are asserted through `GetWorldStats`.
 - **The DrawDebugHelpers pass** (`box3d.DebugDraw` CVar path) — line-batcher

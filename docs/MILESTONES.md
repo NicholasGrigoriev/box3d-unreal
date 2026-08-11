@@ -202,8 +202,33 @@ continuous collision stops 150 m/s movers per the CCD matrix above.
 
 ---
 
+## Post-M6: ports from alattanzio/Box3DUnreal (2026-08)
+
+Evaluated Antonio Lattanzio's independent Box3DUnreal integration (MIT) and
+ported the three capabilities it had that we lacked:
+
+- [x] **Baked static collision** — `Box3DBake` commandlet + `UBox3DCollisionData`
+      assets (`BC_<MapName>` beside the map, auto-discovered). Same filter and
+      geometry as the static mirror; packaged builds no longer depend on
+      CPU-accessible render data. OFPA-aware stale-bake fingerprinting warns in
+      editor/PIE. New `Box3DEditor` module. (docs/BAKED_COLLISION.md)
+- [x] **Authority gating** — `bAuthorityOnlySimulation`: pure clients get no
+      Box3D world; `IsSimulationAuthority()` on the subsystem.
+- [x] **Snapshot / prediction / rollback** — `Box3DSnapshot.h`: per-body
+      capture/restore/djb2-hash, whole-world `FSnapshotRing`,
+      `ReconcileAndReplay` with sub-tolerance skip. Contact-free replay is
+      bit-identical (test-pinned); contact replay diverges by warm-start design
+      — documented. (docs/NETWORKING.md)
+
+Verified by 2 new automation tests (67 total): ring capture/evict/restore
+roundtrips hash-exactly; reconcile no-ops on agreement, replays bit-identically
+on forced rollback, and carries a 1 m authoritative correction through replay.
+
+---
+
 ## Non-goals (for now)
 
 - Replacing Chaos wholesale (UE collision channels, physics assets, ragdolls stay Chaos)
-- Networked physics replication
+- Networked physics *transport* (what to send, when — the snapshot/rollback
+  primitives are here, the wire protocol is game code)
 - Platforms beyond Win64 (nothing blocks Linux/Mac — just untested here)

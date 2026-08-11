@@ -54,7 +54,18 @@ meshes become welded chunks that shatter past a break force —
 velocity drags resting bodies), and `ABox3DWindActor` (per-fixed-step drag
 forces via the subsystem's `OnPreStep` hook; directional, turbulence,
 spline-following, or vortex fields — `box3d.SpawnWind`).
-All of it is pinned by a deterministic automation suite — 65 tests
+Post-M6 ports from [Antonio Lattanzio's Box3DUnreal](https://github.com/alattanzio/Box3DUnreal)
+(MIT): **baked static collision** — a `Box3DBake` commandlet extracts exactly
+what the static mirror would cook into `BC_<MapName>` assets, so packaged
+builds instantiate static geometry without runtime cooking or CPU-accessible
+render data ([docs/BAKED_COLLISION.md](docs/BAKED_COLLISION.md)); **authority
+gating** (`bAuthorityOnlySimulation` — pure clients get no Box3D world); and
+**snapshot / prediction / rollback** primitives — per-body capture/restore/hash,
+a whole-world `FSnapshotRing`, and `ReconcileAndReplay` for client-side
+prediction against an authoritative server
+([docs/NETWORKING.md](docs/NETWORKING.md)).
+
+All of it is pinned by a deterministic automation suite — 67 tests
 (`Automation RunTests Box3DUnreal`, see [docs/TESTING.md](docs/TESTING.md)).
 See [docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap,
 [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions, and
@@ -67,9 +78,9 @@ Requires UE 5.7, C++ project.
 
 ## Tests
 
-65 automation tests cover conversion math, world stepping, body components, queries,
+67 automation tests cover conversion math, world stepping, body components, queries,
 mesh cooking, joints, gameplay events, threading, diagnostics, replay determinism,
-explosions, and continuous collision with analytic assertions
+explosions, continuous collision, and snapshot/rollback with analytic assertions
 ([docs/TESTING.md](docs/TESTING.md)):
 
 ```
@@ -108,6 +119,7 @@ counters), `box3d.Benchmark` (scheduler comparison for sizing
 | --- | --- |
 | `Box3DCore` | Vendored box3d v0.1.0 (C17, unmodified upstream source — see [UPSTREAM.md](UPSTREAM.md)) |
 | `Box3DRuntime` | UE integration: world subsystem, unit conversion, settings, hooks |
+| `Box3DEditor` | Editor tooling: `Box3DBake` commandlet for baked static collision |
 
 ## Conventions
 
@@ -115,7 +127,14 @@ counters), `box3d.Benchmark` (scheduler comparison for sizing
 - Axes: UE's Z-up coordinates are passed straight through (box3d has no up-axis convention)
 - One `b3WorldId` per `UWorld`, owned by `UBox3DWorldSubsystem`
 
-## Licenses
+## Contributing
+
+Open source under MIT — bug reports, suggestions, and pull requests are
+welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Licenses & credits
 
 - This plugin: MIT ([LICENSE](LICENSE))
 - Box3D: MIT, © Erin Catto ([Source/Box3DCore/box3d.LICENSE](Source/Box3DCore/box3d.LICENSE))
+- Baked collision and snapshot/rollback concepts ported from
+  [Box3DUnreal](https://github.com/alattanzio/Box3DUnreal) by Antonio Lattanzio (MIT)

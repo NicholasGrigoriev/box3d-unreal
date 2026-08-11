@@ -26,6 +26,8 @@ enum class EBox3DMirrorGeometry : uint8
 	PreferSimpleCollision,
 };
 
+class UBox3DCollisionData;
+
 /// Project settings for the Box3D physics integration.
 /// Edit in Project Settings > Plugins > Box3D, saved to DefaultGame.ini.
 UCLASS(config = Game, defaultconfig, meta = (DisplayName = "Box3D"))
@@ -126,4 +128,36 @@ public:
 	/// visual latency to Box3D-driven components.
 	UPROPERTY(EditAnywhere, config, Category = "Rendering")
 	bool bInterpolateBodyTransforms = false;
+
+	/// Only create and step the Box3D world where the simulation is authoritative:
+	/// standalone, listen server, and dedicated server. Pure clients get no world —
+	/// body components stay inert and queries return empty (use UE traces there, or
+	/// drive visuals from replicated authority state; see docs/NETWORKING.md).
+	/// Off by default so single-world projects and local experiments are unchanged.
+	/// Evaluated when the world subsystem initializes.
+	UPROPERTY(EditAnywhere, config, Category = "Networking")
+	bool bAuthorityOnlySimulation = false;
+
+	/// Instantiate pre-baked static collision (UBox3DCollisionData assets, produced
+	/// by the Box3DBake commandlet) on world begin-play instead of running the
+	/// static scene mirror's initial cook. Baked assets need no runtime cooking and
+	/// no CPU-accessible render data, so they are the packaged-build path for
+	/// static geometry. Levels streamed in after begin-play still use the runtime
+	/// mirror (when enabled). See docs/BAKED_COLLISION.md.
+	UPROPERTY(EditAnywhere, config, Category = "Baked Static Collision")
+	bool bUseBakedStaticCollision = false;
+
+	/// Baked collision assets to instantiate on world begin-play, on top of
+	/// whatever bAutoDiscoverBakedCollision finds (duplicates are ignored).
+	UPROPERTY(EditAnywhere, config, Category = "Baked Static Collision",
+		meta = (EditCondition = "bUseBakedStaticCollision"))
+	TArray<TSoftObjectPtr<UBox3DCollisionData>> BakedCollisionAssets;
+
+	/// Also load the current map's baked asset (BC_<MapName> beside the map)
+	/// without it being listed above. On by default: forgetting to list an asset
+	/// silently loads a level with no static collision, which looks like a physics
+	/// bug rather than a config mistake.
+	UPROPERTY(EditAnywhere, config, Category = "Baked Static Collision",
+		meta = (EditCondition = "bUseBakedStaticCollision"))
+	bool bAutoDiscoverBakedCollision = true;
 };
