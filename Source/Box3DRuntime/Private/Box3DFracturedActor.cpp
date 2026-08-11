@@ -221,6 +221,8 @@ void ABox3DFracturedActor::InitializeFragments(TArray<FBox3DFragmentData>&& InFr
 	SectionGeometry.Reset();
 
 	Fragments = MoveTemp(InFragments);
+	Box3D::Destruction::ClassifyFragmentTiers(Fragments, TierThresholds, FragmentTiers);
+	Box3D::Destruction::BuildDebrisBurst(Fragments, FragmentTiers, DebrisImpactPoint, DebrisSpeed, DebrisBurst);
 	FragmentSections.Init(FIntPoint(INDEX_NONE, INDEX_NONE), Fragments.Num());
 	Mesh->ClearAllMeshSections();
 
@@ -229,6 +231,10 @@ void ABox3DFracturedActor::InitializeFragments(TArray<FBox3DFragmentData>&& InFr
 
 	for (int32 FragmentIndex = 0; FragmentIndex < Fragments.Num(); ++FragmentIndex)
 	{
+		if (FragmentTiers[FragmentIndex] != EBox3DFragmentTier::Body)
+		{
+			continue;
+		}
 		const FBox3DFragmentData& Fragment = Fragments[FragmentIndex];
 		FSectionBatch Exterior;
 		FSectionBatch Interior;
@@ -280,6 +286,10 @@ void ABox3DFracturedActor::BuildFragmentPhysics()
 	TArray<b3Vec3> Points;
 	for (int32 Index = 0; Index < Fragments.Num(); ++Index)
 	{
+		if (GetFragmentTier(Index) != EBox3DFragmentTier::Body)
+		{
+			continue;
+		}
 		const FBox3DFragmentData& Fragment = Fragments[Index];
 		// Hull points are centroid-relative so the body origin is the center of
 		// mass and the spawn frame matches the actor frame.
@@ -360,8 +370,19 @@ void ABox3DFracturedActor::BuildFragmentPhysics()
 			Welds.Add({ b3CreateWeldJoint(WorldId, &Def), IndexA, IndexB, BreakForce });
 		}
 	}
-	UE_LOG(LogBox3D, Log, TEXT("%s: %d fragment bodies, %d welds"), *GetNameSafe(this),
-		Fragments.Num(), Welds.Num());
+	UE_LOG(LogBox3D, Log, TEXT("%s: %d fragment bodies, %d welds, %d debris, %d dust"), *GetNameSafe(this),
+		CountFragmentsInTier(EBox3DFragmentTier::Body), Welds.Num(),
+		CountFragmentsInTier(EBox3DFragmentTier::Debris), CountFragmentsInTier(EBox3DFragmentTier::Dust));
+}
+
+int32 ABox3DFracturedActor::CountFragmentsInTier(EBox3DFragmentTier Tier) const
+{
+	int32 Count = 0;
+	for (const EBox3DFragmentTier FragmentTier : FragmentTiers)
+	{
+		Count += FragmentTier == Tier ? 1 : 0;
+	}
+	return Count;
 }
 
 void ABox3DFracturedActor::DestroyFragmentPhysics()
@@ -567,6 +588,10 @@ namespace Box3D
 		Actor->MaterialToughness = Params.MaterialToughness;
 		Actor->FragmentDensity = Params.FragmentDensity;
 		Actor->bStartAsleep = Params.bStartAsleep;
+		Actor->TierThresholds = Params.Tiers;
+		Actor->DebrisSpeed = Params.DebrisSpeed;
+		// Fragment/actor space impact, already converted for the fracture core.
+		Actor->DebrisImpactPoint = FractureParams.ImpactPoint;
 		Actor->InitializeFragments(MoveTemp(Fragments), Component->GetMaterial(0));
 
 		// Swap the source out: the fractured actor owns the visuals from here, and

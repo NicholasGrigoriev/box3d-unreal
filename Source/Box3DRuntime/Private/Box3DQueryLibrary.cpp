@@ -2,6 +2,8 @@
 
 #include "Box3DBodyComponent.h"
 #include "Box3DConversion.h"
+#include "Box3DDestructibleComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Box3DRuntime.h"
 #include "Box3DWorldSubsystem.h"
 #include "Engine/Engine.h"
@@ -248,7 +250,7 @@ FVector UBox3DQueryLibrary::Box3DSolveMoverDelta(UObject* WorldContextObject, FV
 }
 
 void UBox3DQueryLibrary::Box3DExplode(UObject* WorldContextObject, FVector Center, float Radius, float Falloff,
-	float ImpulsePerArea, const FBox3DQueryFilter& Filter)
+	float ImpulsePerArea, const FBox3DQueryFilter& Filter, float FractureEnergy)
 {
 	const b3WorldId WorldId = GetB3World(WorldContextObject);
 	if (!b3World_IsValid(WorldId))
@@ -265,4 +267,45 @@ void UBox3DQueryLibrary::Box3DExplode(UObject* WorldContextObject, FVector Cente
 	// is x0.01 / x0.0001 = x100.
 	Def.impulsePerArea = ImpulsePerArea * Box3D::MetersToUE;
 	b3World_Explode(WorldId, &Def);
+
+	if (FractureEnergy <= 0.0f)
+	{
+		return;
+	}
+
+	// Blast energy to destructibles, matching the impulse falloff shape. The
+	// registry is copied first: fracturing swaps meshes out and spawns actors.
+	const UWorld* World =
+		GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
+	const UBox3DWorldSubsystem* Subsystem = World ? World->GetSubsystem<UBox3DWorldSubsystem>() : nullptr;
+	if (Subsystem == nullptr)
+	{
+		return;
+	}
+	const TArray<TWeakObjectPtr<UBox3DDestructibleComponent>> Targets = Subsystem->GetDestructibles();
+	for (const TWeakObjectPtr<UBox3DDestructibleComponent>& Target : Targets)
+	{
+		UBox3DDestructibleComponent* Destructible = Target.Get();
+		const UStaticMeshComponent* Mesh =
+			Destructible != nullptr && !Destructible->IsFractured() ? Destructible->ResolveTargetMesh() : nullptr;
+		if (Mesh == nullptr)
+		{
+			continue;
+		}
+		const FVector ClosestPoint = Mesh->Bounds.GetBox().GetClosestPointTo(Center);
+		const double Distance = FVector::Dist(Center, ClosestPoint);
+		float Energy = 0.0f;
+		if (Distance <= Radius)
+		{
+			Energy = FractureEnergy;
+		}
+		else if (Falloff > 0.0f && Distance < double(Radius) + Falloff)
+		{
+			Energy = FractureEnergy * float(1.0 - (Distance - Radius) / Falloff);
+		}
+		if (Energy > 0.0f)
+		{
+			Destructible->ApplyImpact(ClosestPoint, Energy);
+		}
+	}
 }

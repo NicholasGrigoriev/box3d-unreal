@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Box3DDestruction.h"
 #include "Box3DFracture.h"
 #include "GameFramework/Actor.h"
 #include "box3d/id.h"
@@ -50,6 +51,13 @@ struct FBox3DFractureMeshParams
 	/// Spawn the fragment bodies asleep (welded rubble at rest). Defaults off
 	/// because fracture usually follows an impact that should scatter the pieces.
 	bool bStartAsleep = false;
+
+	/// Volume thresholds routing fragments into Body / Debris / Dust tiers.
+	/// Defaults keep every fragment in the Body tier (the D2 behavior).
+	FBox3DTierThresholds Tiers;
+
+	/// Radial scatter speed (cm/s) recorded for Debris-tier burst fragments.
+	float DebrisSpeed = 300.0f;
 };
 
 /// A fractured static mesh: one ProceduralMeshComponent carrying up to two
@@ -90,6 +98,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture")
 	bool bStartAsleep = false;
 
+	/// Volume thresholds routing fragments into tiers. Set before
+	/// InitializeFragments; non-Body fragments get no sections, bodies, or welds.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture")
+	FBox3DTierThresholds TierThresholds;
+
+	/// Radial scatter speed (cm/s) of Debris-tier burst velocities. Set before
+	/// InitializeFragments.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture", meta = (ClampMin = "0"))
+	float DebrisSpeed = 300.0f;
+
+	/// Impact point in actor space that debris scatters away from. Set before
+	/// InitializeFragments (FractureMesh fills it from the fracture params).
+	FVector DebrisImpactPoint = FVector::ZeroVector;
+
 	/// One or more welds snapped this check.
 	UPROPERTY(BlueprintAssignable, Category = "Fracture")
 	FBox3DFracturedWeldBrokeSignature OnWeldBroken;
@@ -122,6 +144,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Fracture")
 	int32 GetLiveWeldCount() const { return Welds.Num(); }
 
+	/// Simulation tier the fragment was routed to (Body when unclassified).
+	EBox3DFragmentTier GetFragmentTier(int32 FragmentIndex) const
+	{
+		return FragmentTiers.IsValidIndex(FragmentIndex) ? FragmentTiers[FragmentIndex]
+														 : EBox3DFragmentTier::Body;
+	}
+
+	int32 CountFragmentsInTier(EBox3DFragmentTier Tier) const;
+
+	/// Burst arrays of the Debris-tier fragments, in actor space. The Niagara
+	/// hookup consuming these is a later D3 slice.
+	const FBox3DDebrisBurst& GetDebrisBurst() const { return DebrisBurst; }
+
 	/// Surviving weld fragment pairs, X < Y. Island counting for tests and later
 	/// milestones.
 	void GetLiveWeldPairs(TArray<FIntPoint>& OutPairs) const;
@@ -152,6 +187,11 @@ private:
 	TObjectPtr<UProceduralMeshComponent> Mesh;
 
 	TArray<Box3D::Fracture::FBox3DFragmentData> Fragments;
+
+	/// Per-fragment tier, parallel to Fragments.
+	TArray<EBox3DFragmentTier> FragmentTiers;
+
+	FBox3DDebrisBurst DebrisBurst;
 
 	/// Per-fragment (ExteriorSection, InteriorSection), INDEX_NONE = absent.
 	TArray<FIntPoint> FragmentSections;

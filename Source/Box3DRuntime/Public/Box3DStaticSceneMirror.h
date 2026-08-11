@@ -92,7 +92,10 @@ private:
 	void MirrorComponent(UStaticMeshComponent& Component, FLevelEntry& Entry);
 
 	/// One static body at the given transform. Invalid id if no geometry cooked.
-	b3BodyId CreateStaticBody(const FTransform& InstanceToWorld, UStaticMesh& Mesh, const char* DebugName);
+	/// bEnableHitEvents turns on hit events for the body's shapes — set for
+	/// destructible-marked components so impacts reach the damage pipeline.
+	b3BodyId CreateStaticBody(const FTransform& InstanceToWorld, UStaticMesh& Mesh, const char* DebugName,
+		bool bEnableHitEvents);
 
 	void OnLevelAdded(ULevel* Level, UWorld* OwningWorld);
 	void OnLevelRemoved(ULevel* Level, UWorld* OwningWorld);

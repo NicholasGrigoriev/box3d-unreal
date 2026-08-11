@@ -2,6 +2,7 @@
 
 #include "Box3DConversion.h"
 #include "Box3DCooking.h"
+#include "Box3DDestructibleComponent.h"
 #include "Box3DRuntime.h"
 #include "Box3DSettings.h"
 #include "Box3DTypes.h"
@@ -239,6 +240,12 @@ void FBox3DStaticSceneMirror::MirrorComponent(UStaticMeshComponent& Component, F
 	const FTCHARToUTF8 NameUtf8(*Component.GetName());
 	TArray<uint64> Bodies;
 
+	// Destructible-marked meshes need their mirror shapes to report hit events:
+	// that is the D3 damage pipeline's impact intake (Box3DWorldSubsystem routes
+	// component-less hit shapes back through FindMirroredComponent).
+	const bool bEnableHitEvents = Component.GetOwner() != nullptr
+		&& Component.GetOwner()->FindComponentByClass<UBox3DDestructibleComponent>() != nullptr;
+
 	if (const UInstancedStaticMeshComponent* Ism = Cast<UInstancedStaticMeshComponent>(&Component))
 	{
 		const int32 InstanceCount = Ism->GetInstanceCount();
@@ -248,7 +255,7 @@ void FBox3DStaticSceneMirror::MirrorComponent(UStaticMeshComponent& Component, F
 			FTransform InstanceToWorld;
 			if (Ism->GetInstanceTransform(Index, InstanceToWorld, /*bWorldSpace*/ true))
 			{
-				const b3BodyId BodyId = CreateStaticBody(InstanceToWorld, *Mesh, NameUtf8.Get());
+				const b3BodyId BodyId = CreateStaticBody(InstanceToWorld, *Mesh, NameUtf8.Get(), bEnableHitEvents);
 				if (b3Body_IsValid(BodyId))
 				{
 					Bodies.Add(b3StoreBodyId(BodyId));
@@ -258,7 +265,7 @@ void FBox3DStaticSceneMirror::MirrorComponent(UStaticMeshComponent& Component, F
 	}
 	else
 	{
-		const b3BodyId BodyId = CreateStaticBody(Component.GetComponentTransform(), *Mesh, NameUtf8.Get());
+		const b3BodyId BodyId = CreateStaticBody(Component.GetComponentTransform(), *Mesh, NameUtf8.Get(), bEnableHitEvents);
 		if (b3Body_IsValid(BodyId))
 		{
 			Bodies.Add(b3StoreBodyId(BodyId));
@@ -281,7 +288,7 @@ void FBox3DStaticSceneMirror::MirrorComponent(UStaticMeshComponent& Component, F
 }
 
 b3BodyId FBox3DStaticSceneMirror::CreateStaticBody(const FTransform& InstanceToWorld, UStaticMesh& Mesh,
-	const char* DebugName)
+	const char* DebugName, bool bEnableHitEvents)
 {
 	b3BodyDef BodyDef = b3DefaultBodyDef();
 	BodyDef.type = b3_staticBody;
@@ -299,7 +306,7 @@ b3BodyId FBox3DStaticSceneMirror::CreateStaticBody(const FTransform& InstanceToW
 	ShapeDef.filter.maskBits = UINT64_MAX;
 	ShapeDef.enableSensorEvents = false;
 	ShapeDef.enableContactEvents = false;
-	ShapeDef.enableHitEvents = false;
+	ShapeDef.enableHitEvents = bEnableHitEvents;
 
 	const FVector Scale = InstanceToWorld.GetScale3D();
 	int32 Created = 0;

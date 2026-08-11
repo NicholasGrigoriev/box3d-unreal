@@ -7,6 +7,7 @@
 #include "Box3DWorldSubsystem.generated.h"
 
 class UBox3DBodyComponent;
+class UBox3DDestructibleComponent;
 class UBox3DJointComponent;
 class FBox3DBakedScene;
 class FBox3DUETaskPool;
@@ -171,6 +172,13 @@ public:
 	/// before each tick's stepping until creation succeeds or attempts run out.
 	void AddPendingJoint(UBox3DJointComponent* Joint);
 
+	/// Destructible markers register themselves on BeginPlay. The hit-event pump
+	/// routes mirror-body impacts to them, and Box3DExplode's fracture energy
+	/// fans out over this registry.
+	void RegisterDestructible(UBox3DDestructibleComponent* Component);
+	void UnregisterDestructible(UBox3DDestructibleComponent* Component);
+	const TArray<TWeakObjectPtr<UBox3DDestructibleComponent>>& GetDestructibles() const { return Destructibles; }
+
 	/// Drop a body's interpolation segment after an explicit teleport so the next
 	/// segment starts from the teleported pose instead of rubber-banding.
 	void InvalidateInterpolation(UBox3DBodyComponent* Component);
@@ -202,6 +210,11 @@ private:
 	/// Dispatch contact/hit/sensor/joint-threshold events to components. Runs
 	/// after every fixed step because box3d buffers events per step only.
 	void PumpEvents();
+
+	/// Fracture destructibles hit this tick. Deferred out of PumpEvents because
+	/// fracturing creates/destroys bodies, which must not happen while iterating
+	/// the step's event buffers.
+	void DrainDestructibleImpacts();
 
 	/// Publish profile/counter values to `stat box3d` (compiled out without STATS).
 	void UpdateStats() const;
@@ -245,6 +258,16 @@ private:
 
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> KinematicBodies;
 	TArray<TWeakObjectPtr<UBox3DJointComponent>> PendingJoints;
+	TArray<TWeakObjectPtr<UBox3DDestructibleComponent>> Destructibles;
+
+	/// One queued impact against a destructible, in event order (deterministic).
+	struct FPendingDestructibleImpact
+	{
+		TWeakObjectPtr<UBox3DDestructibleComponent> Destructible;
+		FVector Location = FVector::ZeroVector;
+		float EnergyJoules = 0.0f;
+	};
+	TArray<FPendingDestructibleImpact> PendingDestructibleImpacts;
 
 	/// One segment per dynamic body that moved: pose at the previous and latest
 	/// fixed step, plus which step produced P1 (stale segments snap and drop).

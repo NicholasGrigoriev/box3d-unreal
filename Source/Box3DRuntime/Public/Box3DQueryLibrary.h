@@ -46,9 +46,14 @@ public:
 	/// negative values implode. Velocities change immediately (no step needed).
 	/// Only the filter's mask bits apply. Spheres, capsules, and hulls only;
 	/// per-shape opt-out via box3d's explosionScale (default 1).
+	///
+	/// FractureEnergy > 0 additionally feeds the destruction pipeline: every
+	/// registered UBox3DDestructibleComponent whose mesh bounds lie within the
+	/// blast receives that energy (J) — full inside Radius, tapering linearly to
+	/// zero across Falloff — at the bounds point nearest the blast center.
 	UFUNCTION(BlueprintCallable, Category = "Box3D|World", meta = (WorldContext = "WorldContextObject", AutoCreateRefTerm = "Filter"))
 	static void Box3DExplode(UObject* WorldContextObject, FVector Center, float Radius, float Falloff,
-		float ImpulsePerArea, const FBox3DQueryFilter& Filter);
+		float ImpulsePerArea, const FBox3DQueryFilter& Filter, float FractureEnergy = 0.0f);
 
 	//~ Character mover helpers (box3d's kinematic mover toolkit) -----------------
 

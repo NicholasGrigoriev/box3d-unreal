@@ -5,7 +5,11 @@
 #include "Box3DCollisionData.h"
 #include "Box3DConversion.h"
 #include "Box3DDebugDraw.h"
+#include "Box3DDestructibleComponent.h"
+#include "Box3DDestruction.h"
 #include "Box3DJointComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "GameFramework/Actor.h"
 #include "Box3DPropConversion.h"
 #include "Box3DRuntime.h"
 #include "Box3DSettings.h"
@@ -313,6 +317,11 @@ void UBox3DWorldSubsystem::Tick(float DeltaTime)
 		SyncMovedBodies();
 	}
 
+	if (!PendingDestructibleImpacts.IsEmpty())
+	{
+		DrainDestructibleImpacts();
+	}
+
 	UpdateStats();
 
 	if (FBox3DDebugDrawer::IsDrawEnabled())
@@ -355,6 +364,30 @@ void UBox3DWorldSubsystem::RegisterKinematicBody(UBox3DBodyComponent* Component)
 void UBox3DWorldSubsystem::UnregisterKinematicBody(UBox3DBodyComponent* Component)
 {
 	KinematicBodies.Remove(Component);
+}
+
+void UBox3DWorldSubsystem::RegisterDestructible(UBox3DDestructibleComponent* Component)
+{
+	Destructibles.AddUnique(Component);
+}
+
+void UBox3DWorldSubsystem::UnregisterDestructible(UBox3DDestructibleComponent* Component)
+{
+	Destructibles.Remove(Component);
+}
+
+void UBox3DWorldSubsystem::DrainDestructibleImpacts()
+{
+	for (const FPendingDestructibleImpact& Impact : PendingDestructibleImpacts)
+	{
+		if (UBox3DDestructibleComponent* Destructible = Impact.Destructible.Get())
+		{
+			// ApplyImpact re-checks IsFractured, so multiple impacts queued against
+			// one destructible in the same tick fracture it exactly once.
+			Destructible->ApplyImpact(Impact.Location, Impact.EnergyJoules);
+		}
+	}
+	PendingDestructibleImpacts.Reset();
 }
 
 void UBox3DWorldSubsystem::PushKinematicTargets(float FixedDeltaTime)
@@ -463,6 +496,39 @@ void UBox3DWorldSubsystem::PumpEvents()
 		if (B != nullptr)
 		{
 			B->NotifyHit(A, Location, Normal, ApproachSpeed);
+		}
+
+		// Destructible intake: shapes with no component may be mirror bodies of a
+		// destructible-marked mesh. Impact energy comes from the event itself
+		// (approach speed x the other body's mass) — weld constraint forces never
+		// see instantaneous impacts, so fracture must key off the event. Queued,
+		// not applied: fracturing mutates the world mid-event-iteration otherwise.
+		const auto QueueDestructibleImpact = [&](b3ShapeId SelfShape, b3ShapeId OtherShape)
+		{
+			if (!StaticMirror.IsValid())
+			{
+				return;
+			}
+			const UStaticMeshComponent* Mirrored =
+				StaticMirror->FindMirroredComponent(b3Shape_GetBody(SelfShape));
+			const AActor* Owner = Mirrored != nullptr ? Mirrored->GetOwner() : nullptr;
+			UBox3DDestructibleComponent* Destructible =
+				Owner != nullptr ? Owner->FindComponentByClass<UBox3DDestructibleComponent>() : nullptr;
+			if (Destructible == nullptr || Destructible->IsFractured())
+			{
+				return;
+			}
+			const float MassKg = b3Body_GetMass(b3Shape_GetBody(OtherShape));
+			PendingDestructibleImpacts.Add({ Destructible, Location,
+				Box3D::Destruction::ImpactEnergyJoules(MassKg, ApproachSpeed) });
+		};
+		if (A == nullptr)
+		{
+			QueueDestructibleImpact(Event.shapeIdA, Event.shapeIdB);
+		}
+		if (B == nullptr)
+		{
+			QueueDestructibleImpact(Event.shapeIdB, Event.shapeIdA);
 		}
 	}
 
