@@ -8,6 +8,7 @@
 #include "Box3DFracturedActor.generated.h"
 
 class UMaterialInterface;
+class UNiagaraSystem;
 class UProceduralMeshComponent;
 class UStaticMeshComponent;
 
@@ -58,6 +59,11 @@ struct FBox3DFractureMeshParams
 
 	/// Radial scatter speed (cm/s) recorded for Debris-tier burst fragments.
 	float DebrisSpeed = 300.0f;
+
+	/// Niagara system spawned with the Debris-tier burst arrays (user parameters
+	/// DebrisPositions / DebrisVelocities / DebrisSizes, world space). Null skips
+	/// the spawn — the burst arrays stay inspectable data either way.
+	UNiagaraSystem* DebrisSystem = nullptr;
 };
 
 /// A fractured static mesh: one ProceduralMeshComponent carrying up to two
@@ -111,6 +117,13 @@ public:
 	/// Impact point in actor space that debris scatters away from. Set before
 	/// InitializeFragments (FractureMesh fills it from the fracture params).
 	FVector DebrisImpactPoint = FVector::ZeroVector;
+
+	/// Niagara system handed the Debris-tier burst on InitializeFragments as
+	/// world-space user array parameters: DebrisPositions (Position/Vector),
+	/// DebrisVelocities (Vector), DebrisSizes (float, cube edge lengths in cm).
+	/// Null (the default) spawns nothing. Set before InitializeFragments.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture")
+	TObjectPtr<UNiagaraSystem> DebrisSystem;
 
 	/// One or more welds snapped this check.
 	UPROPERTY(BlueprintAssignable, Category = "Fracture")
@@ -183,6 +196,9 @@ public:
 private:
 	void BuildFragmentPhysics();
 	void DestroyFragmentPhysics();
+
+	/// Fire-and-forget DebrisSystem spawn carrying the burst arrays, world space.
+	void SpawnDebrisBurst() const;
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Fracture", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UProceduralMeshComponent> Mesh;
 

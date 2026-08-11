@@ -74,6 +74,31 @@ namespace Box3DTest
 		}
 	};
 
+	/// Temporarily override the D3 destruction budgets (fragment pool cap and
+	/// per-tick fracture time budget). Both are read live on use, so the scope
+	/// only needs to cover the fractures under test. 0 = unlimited for either.
+	struct FScopedDestructionSettings
+	{
+		int32 SavedMaxLiveFragments;
+		float SavedFractureTimeBudgetMs;
+
+		FScopedDestructionSettings(int32 MaxLiveFragments, float FractureTimeBudgetMs)
+		{
+			UBox3DSettings* Settings = GetMutableDefault<UBox3DSettings>();
+			SavedMaxLiveFragments = Settings->MaxLiveFragments;
+			SavedFractureTimeBudgetMs = Settings->FractureTimeBudgetMs;
+			Settings->MaxLiveFragments = MaxLiveFragments;
+			Settings->FractureTimeBudgetMs = FractureTimeBudgetMs;
+		}
+
+		~FScopedDestructionSettings()
+		{
+			UBox3DSettings* Settings = GetMutableDefault<UBox3DSettings>();
+			Settings->MaxLiveFragments = SavedMaxLiveFragments;
+			Settings->FractureTimeBudgetMs = SavedFractureTimeBudgetMs;
+		}
+	};
+
 	/// Temporarily force interpolated body transforms on or off (read live each
 	/// Tick, so the scope only needs to cover the ticks under test). Tests that
 	/// assert exact post-step positions must force it OFF: the project config can

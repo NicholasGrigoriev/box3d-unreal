@@ -6,6 +6,7 @@
 #include "box3d/id.h"
 #include "Box3DWorldSubsystem.generated.h"
 
+class ABox3DFracturedActor;
 class UBox3DBodyComponent;
 class UBox3DDestructibleComponent;
 class UBox3DJointComponent;
@@ -179,6 +180,28 @@ public:
 	void UnregisterDestructible(UBox3DDestructibleComponent* Component);
 	const TArray<TWeakObjectPtr<UBox3DDestructibleComponent>>& GetDestructibles() const { return Destructibles; }
 
+	/// Queue impact damage against a destructible for the budgeted end-of-tick
+	/// drain. The hit-event pump feeds this internally; game code can feed it too
+	/// when it prefers budgeted destruction over an immediate ApplyImpact. Queue
+	/// order is preserved across ticks, so bursts of events fracture
+	/// deterministically even when the per-tick budget spreads them out.
+	void QueueDestructibleImpact(UBox3DDestructibleComponent* Destructible, const FVector& WorldLocation,
+		float EnergyJoules);
+
+	/// Impacts still queued, waiting on the per-tick fracture budget.
+	int32 GetPendingDestructibleImpactCount() const { return PendingDestructibleImpacts.Num(); }
+
+	/// Fractured actors register when their fragments initialize — the D3 fragment
+	/// pool, oldest first. Registration enforces UBox3DSettings::MaxLiveFragments:
+	/// oldest actors are destroyed until the Body-tier fragment total fits.
+	void RegisterFracturedActor(ABox3DFracturedActor* Actor);
+	void UnregisterFracturedActor(ABox3DFracturedActor* Actor);
+	const TArray<TWeakObjectPtr<ABox3DFracturedActor>>& GetLiveFracturedActors() const { return LiveFracturedActors; }
+
+	/// Body-tier fragments across all live fractured actors — the number the
+	/// MaxLiveFragments cap is enforced against.
+	int32 GetLiveFragmentCount() const;
+
 	/// Drop a body's interpolation segment after an explicit teleport so the next
 	/// segment starts from the teleported pose instead of rubber-banding.
 	void InvalidateInterpolation(UBox3DBodyComponent* Component);
@@ -211,10 +234,14 @@ private:
 	/// after every fixed step because box3d buffers events per step only.
 	void PumpEvents();
 
-	/// Fracture destructibles hit this tick. Deferred out of PumpEvents because
-	/// fracturing creates/destroys bodies, which must not happen while iterating
-	/// the step's event buffers.
+	/// Fracture destructibles hit this tick, oldest queue entries first, stopping
+	/// once the per-tick fracture budget is spent (the remainder carries over).
+	/// Deferred out of PumpEvents because fracturing creates/destroys bodies,
+	/// which must not happen while iterating the step's event buffers.
 	void DrainDestructibleImpacts();
+
+	/// Destroy oldest fractured actors while the fragment pool exceeds its cap.
+	void EnforceFragmentPool();
 
 	/// Publish profile/counter values to `stat box3d` (compiled out without STATS).
 	void UpdateStats() const;
@@ -259,6 +286,9 @@ private:
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> KinematicBodies;
 	TArray<TWeakObjectPtr<UBox3DJointComponent>> PendingJoints;
 	TArray<TWeakObjectPtr<UBox3DDestructibleComponent>> Destructibles;
+
+	/// Live fractured actors in creation order (oldest first) — the fragment pool.
+	TArray<TWeakObjectPtr<ABox3DFracturedActor>> LiveFracturedActors;
 
 	/// One queued impact against a destructible, in event order (deterministic).
 	struct FPendingDestructibleImpact

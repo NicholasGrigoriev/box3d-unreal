@@ -7,6 +7,7 @@
 
 class ABox3DFracturedActor;
 class UMaterialInterface;
+class UNiagaraSystem;
 class UStaticMeshComponent;
 
 /// Opt-in destructible marker — the designer-facing surface of the D3 damage
@@ -62,6 +63,13 @@ public:
 	/// Radial scatter speed (cm/s) of Debris-tier burst fragments.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Tiers", meta = (ClampMin = "0"))
 	float DebrisSpeed = 300.0f;
+
+	/// Niagara system spawned with the Debris-tier burst on fracture. Receives
+	/// world-space user array parameters DebrisPositions (Vector), DebrisVelocities
+	/// (Vector), and DebrisSizes (float, cube edge lengths in cm). Null (the
+	/// default) spawns no effect — sub-physics fragments simply vanish.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Tiers")
+	TObjectPtr<UNiagaraSystem> DebrisSystem;
 
 	/// Deal impact damage at a world location. Maps the energy (J) through
 	/// EnergyToCells and fractures the target mesh when it clears MinEnergy.

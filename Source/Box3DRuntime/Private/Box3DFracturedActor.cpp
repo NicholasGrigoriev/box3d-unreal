@@ -10,6 +10,10 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "Materials/MaterialInterface.h"
+#include "NiagaraComponent.h"
+#include "NiagaraDataInterfaceArrayFunctionLibrary.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "ProceduralMeshComponent.h"
 #include "box3d/box3d.h"
@@ -223,6 +227,7 @@ void ABox3DFracturedActor::InitializeFragments(TArray<FBox3DFragmentData>&& InFr
 	Fragments = MoveTemp(InFragments);
 	Box3D::Destruction::ClassifyFragmentTiers(Fragments, TierThresholds, FragmentTiers);
 	Box3D::Destruction::BuildDebrisBurst(Fragments, FragmentTiers, DebrisImpactPoint, DebrisSpeed, DebrisBurst);
+	SpawnDebrisBurst();
 	FragmentSections.Init(FIntPoint(INDEX_NONE, INDEX_NONE), Fragments.Num());
 	Mesh->ClearAllMeshSections();
 
@@ -270,6 +275,47 @@ void ABox3DFracturedActor::InitializeFragments(TArray<FBox3DFragmentData>&& InFr
 	}
 
 	BuildFragmentPhysics();
+
+	// Join the fragment pool last: registration may evict older fractured actors
+	// to make room, and this actor's own footprint must be final by then.
+	if (UBox3DWorldSubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UBox3DWorldSubsystem>() : nullptr)
+	{
+		Subsystem->RegisterFracturedActor(this);
+	}
+}
+
+void ABox3DFracturedActor::SpawnDebrisBurst() const
+{
+	if (DebrisSystem == nullptr || DebrisBurst.Positions.IsEmpty())
+	{
+		return;
+	}
+
+	// The burst arrays are actor-space data; Niagara gets world-space copies so
+	// the system needs no transform plumbing.
+	const FTransform& ActorToWorld = GetActorTransform();
+	TArray<FVector> Positions;
+	TArray<FVector> Velocities;
+	Positions.Reserve(DebrisBurst.Positions.Num());
+	Velocities.Reserve(DebrisBurst.Velocities.Num());
+	for (const FVector& Position : DebrisBurst.Positions)
+	{
+		Positions.Add(ActorToWorld.TransformPosition(Position));
+	}
+	for (const FVector& Velocity : DebrisBurst.Velocities)
+	{
+		Velocities.Add(ActorToWorld.TransformVector(Velocity));
+	}
+
+	UNiagaraComponent* Burst = UNiagaraFunctionLibrary::SpawnSystemAtLocation(GetWorld(), DebrisSystem,
+		GetActorLocation(), GetActorRotation(), FVector::OneVector, /*bAutoDestroy*/ true);
+	if (Burst == nullptr)
+	{
+		return;
+	}
+	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayVector(Burst, TEXT("DebrisPositions"), Positions);
+	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayVector(Burst, TEXT("DebrisVelocities"), Velocities);
+	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayFloat(Burst, TEXT("DebrisSizes"), DebrisBurst.Sizes);
 }
 
 void ABox3DFracturedActor::BuildFragmentPhysics()
@@ -408,6 +454,10 @@ void ABox3DFracturedActor::DestroyFragmentPhysics()
 
 void ABox3DFracturedActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (UBox3DWorldSubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UBox3DWorldSubsystem>() : nullptr)
+	{
+		Subsystem->UnregisterFracturedActor(this);
+	}
 	DestroyFragmentPhysics();
 	Super::EndPlay(EndPlayReason);
 }
@@ -590,6 +640,7 @@ namespace Box3D
 		Actor->bStartAsleep = Params.bStartAsleep;
 		Actor->TierThresholds = Params.Tiers;
 		Actor->DebrisSpeed = Params.DebrisSpeed;
+		Actor->DebrisSystem = Params.DebrisSystem;
 		// Fragment/actor space impact, already converted for the fracture core.
 		Actor->DebrisImpactPoint = FractureParams.ImpactPoint;
 		Actor->InitializeFragments(MoveTemp(Fragments), Component->GetMaterial(0));

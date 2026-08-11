@@ -243,6 +243,18 @@ on forced rollback, and carries a 1 m authoritative correction through replay.
       `OnWeldBroken`, body-driven section sync, `box3d.Fracture`;
       6 automation tests (82 total).
 
+- [x] **D3 — damage pipeline + tiers + budgets** ✅ 2026-08-12 — impact
+      intake (hit-event energy ½mv² via mirror shapes of
+      `UBox3DDestructibleComponent`-marked meshes, `Box3DExplode` blast
+      falloff), monotonic clamped `FBox3DEnergyToCellCurve` (`MaxCellCount`
+      doubles as the per-event cell cap), volume-threshold tier routing
+      (Body / Debris / Dust) with debris burst arrays + optional Niagara
+      `DebrisSystem` hookup, fragment pool (`MaxLiveFragments`) with
+      oldest-first eviction, per-tick fracture budget
+      (`FractureTimeBudgetMs`) with cross-tick impact queueing and a public
+      `QueueDestructibleImpact` API, `box3d.DestructionStress`;
+      6 automation tests (88 total).
+
 ---
 
 ## Non-goals (for now)

@@ -115,6 +115,19 @@ public:
 	UPROPERTY(EditAnywhere, config, Category = "Static Scene Mirror", meta = (ClampMin = "0", EditCondition = "bMirrorStaticGeometry"))
 	float MirrorTimeBudgetMs = 0.0f;
 
+	/// Global cap on simulated (Body-tier) fracture fragments alive at once — the
+	/// D3 fragment pool. When a new fracture pushes the total over the cap, the
+	/// oldest fractured actors despawn first until it fits again (the newest
+	/// fracture always survives, even alone over the cap). 0 = unlimited.
+	UPROPERTY(EditAnywhere, config, Category = "Destruction", meta = (ClampMin = "0"))
+	int32 MaxLiveFragments = 256;
+
+	/// Per-tick time budget (ms) for fracturing queued destructible impacts. At
+	/// least one impact is processed per tick; the rest of the queue carries over
+	/// to following ticks in order. 0 = fracture the whole queue every tick.
+	UPROPERTY(EditAnywhere, config, Category = "Destruction", meta = (ClampMin = "0"))
+	float FractureTimeBudgetMs = 2.0f;
+
 	/// Convert every placed static-mesh actor whose root simulates Chaos physics
 	/// into a Box3D prop (ABox3DPropActor) when a game world starts and when
 	/// levels stream in. "Simulate Physics" on a placed actor thereby becomes the

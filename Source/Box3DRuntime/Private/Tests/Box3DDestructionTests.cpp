@@ -1,8 +1,10 @@
-// Tests for the D3 damage pipeline intake and tier policy: impact energy from
-// approach speed x mass, the monotonic clamped energy -> cell-count curve,
-// volume-threshold tier routing (Body / Debris / Dust) as pure data through the
-// fractured actor, hit-event intake against destructible-marked mirror bodies,
-// and Box3DExplode's fracture-energy fan-out with distance falloff.
+// Tests for the D3 damage pipeline intake, tier policy, and global budgets:
+// impact energy from approach speed x mass, the monotonic clamped energy ->
+// cell-count curve, volume-threshold tier routing (Body / Debris / Dust) as
+// pure data through the fractured actor, hit-event intake against
+// destructible-marked mirror bodies, Box3DExplode's fracture-energy fan-out
+// with distance falloff, the fragment pool cap with oldest-first eviction, and
+// the per-tick fracture budget with cross-tick impact queueing.
 
 #include "Misc/AutomationTest.h"
 
@@ -280,6 +282,148 @@ bool FBox3DDestructionExplosionIntakeTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("blast energy maps to multiple cells"), Actor->GetFragmentCount() >= 2);
 		TestTrue(TEXT("cell cap respected"), Actor->GetFragmentCount() <= Near->EnergyToCells.MaxCellCount);
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DDestructionFragmentPoolTest,
+	"Box3DUnreal.Destruction.FragmentPool", BOX3D_TEST_FLAGS)
+bool FBox3DDestructionFragmentPoolTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld Test;
+
+	// Identical cubes, seeds, and energies: every fracture yields the same
+	// Body-tier fragment count, measured once with the pool unlimited.
+	float NextX = 0.0f;
+	const auto FractureCube = [&]() -> ABox3DFracturedActor*
+	{
+		const float X = NextX;
+		NextX += 300.0f;
+		UStaticMeshComponent* Component = Box3DTest::SpawnSceneMesh(Test.World, Box3DTest::LoadCubeMesh(),
+			FTransform(FVector(X, 0, 50)), EComponentMobility::Movable, ECollisionEnabled::QueryAndPhysics);
+		return AddDestructible(Component)->ApplyImpact(FVector(X, 0, 100), 5000.0f);
+	};
+
+	int32 PerActor = 0;
+	ABox3DFracturedActor* First = nullptr;
+	{
+		Box3DTest::FScopedDestructionSettings Unlimited(0, 0.0f);
+		First = FractureCube();
+		if (!TestNotNull(TEXT("first fracture succeeds"), First))
+		{
+			return false;
+		}
+		PerActor = First->CountFragmentsInTier(EBox3DFragmentTier::Body);
+		TestTrue(TEXT("fracture yields multiple body fragments"), PerActor >= 2);
+		TestEqual(TEXT("pool tracks live body fragments"), Test.Subsystem().GetLiveFragmentCount(), PerActor);
+	}
+
+	// Cap = two actors' worth: the third fracture must evict exactly the oldest.
+	Box3DTest::FScopedDestructionSettings Capped(PerActor * 2, 0.0f);
+	ABox3DFracturedActor* Second = FractureCube();
+	if (!TestNotNull(TEXT("second fracture succeeds"), Second))
+	{
+		return false;
+	}
+	TestTrue(TEXT("at the cap nothing is evicted"), IsValid(First) && IsValid(Second));
+	TestEqual(TEXT("pool holds two actors"), Test.Subsystem().GetLiveFracturedActors().Num(), 2);
+
+	ABox3DFracturedActor* Third = FractureCube();
+	if (!TestNotNull(TEXT("third fracture succeeds"), Third))
+	{
+		return false;
+	}
+	TestFalse(TEXT("over the cap the oldest actor is evicted"), IsValid(First));
+	TestTrue(TEXT("younger actors survive eviction"), IsValid(Second) && IsValid(Third));
+	TestTrue(TEXT("pool back within the cap"), Test.Subsystem().GetLiveFragmentCount() <= PerActor * 2);
+
+	ABox3DFracturedActor* Fourth = FractureCube();
+	if (!TestNotNull(TEXT("fourth fracture succeeds"), Fourth))
+	{
+		return false;
+	}
+	TestFalse(TEXT("eviction is strictly oldest-first"), IsValid(Second));
+	TestTrue(TEXT("newest actors survive"), IsValid(Third) && IsValid(Fourth));
+
+	// A fracture larger than the whole cap still spawns: the newest actor is
+	// never evicted, everything older goes.
+	{
+		Box3DTest::FScopedDestructionSettings Tiny(1, 0.0f);
+		ABox3DFracturedActor* Fifth = FractureCube();
+		if (!TestNotNull(TEXT("over-cap fracture still spawns"), Fifth))
+		{
+			return false;
+		}
+		TestTrue(TEXT("newest actor is never evicted"), IsValid(Fifth));
+		TestFalse(TEXT("all older actors evicted"), IsValid(Third) || IsValid(Fourth));
+		TestEqual(TEXT("pool holds only the newest"), Test.Subsystem().GetLiveFracturedActors().Num(), 1);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DDestructionFractureBudgetTest,
+	"Box3DUnreal.Destruction.FractureBudget", BOX3D_TEST_FLAGS)
+bool FBox3DDestructionFractureBudgetTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld Test;
+	UBox3DWorldSubsystem& Subsystem = Test.Subsystem();
+
+	const auto SpawnDestructibleCube = [&](float X) -> UBox3DDestructibleComponent*
+	{
+		UStaticMeshComponent* Component = Box3DTest::SpawnSceneMesh(Test.World, Box3DTest::LoadCubeMesh(),
+			FTransform(FVector(X, 0, 50)), EComponentMobility::Movable, ECollisionEnabled::QueryAndPhysics);
+		return AddDestructible(Component);
+	};
+
+	UBox3DDestructibleComponent* Targets[3];
+	for (int32 Index = 0; Index < 3; ++Index)
+	{
+		Targets[Index] = SpawnDestructibleCube(Index * 300.0f);
+	}
+
+	// A near-zero budget degenerates to the guaranteed minimum of one impact per
+	// tick — frame-exact on any machine, however fast the fracture itself is.
+	{
+		Box3DTest::FScopedDestructionSettings OnePerTick(0, KINDA_SMALL_NUMBER);
+		for (int32 Index = 0; Index < 3; ++Index)
+		{
+			Subsystem.QueueDestructibleImpact(Targets[Index], FVector(Index * 300.0f, 0, 100), 5000.0f);
+		}
+		TestEqual(TEXT("three impacts queued"), Subsystem.GetPendingDestructibleImpactCount(), 3);
+
+		Test.Step(1);
+		TestTrue(TEXT("tick 1 fractures the first target"), Targets[0]->IsFractured());
+		TestFalse(TEXT("tick 1 leaves the second queued"), Targets[1]->IsFractured());
+		TestFalse(TEXT("tick 1 leaves the third queued"), Targets[2]->IsFractured());
+		TestEqual(TEXT("two impacts carry over"), Subsystem.GetPendingDestructibleImpactCount(), 2);
+
+		Test.Step(1);
+		TestTrue(TEXT("tick 2 fractures the second target"), Targets[1]->IsFractured());
+		TestFalse(TEXT("tick 2 leaves the third queued"), Targets[2]->IsFractured());
+		TestEqual(TEXT("one impact carries over"), Subsystem.GetPendingDestructibleImpactCount(), 1);
+
+		Test.Step(1);
+		TestTrue(TEXT("tick 3 fractures the third target"), Targets[2]->IsFractured());
+		TestEqual(TEXT("queue fully drained"), Subsystem.GetPendingDestructibleImpactCount(), 0);
+	}
+
+	// Zero budget = unlimited: the whole queue drains in one tick.
+	{
+		UBox3DDestructibleComponent* ExtraA = SpawnDestructibleCube(900.0f);
+		UBox3DDestructibleComponent* ExtraB = SpawnDestructibleCube(1200.0f);
+		Box3DTest::FScopedDestructionSettings Unlimited(0, 0.0f);
+		Subsystem.QueueDestructibleImpact(ExtraA, FVector(900, 0, 100), 5000.0f);
+		Subsystem.QueueDestructibleImpact(ExtraB, FVector(1200, 0, 100), 5000.0f);
+		Test.Step(1);
+		TestTrue(TEXT("unlimited budget drains the whole queue in one tick"),
+			ExtraA->IsFractured() && ExtraB->IsFractured());
+		TestEqual(TEXT("nothing carries over"), Subsystem.GetPendingDestructibleImpactCount(), 0);
+	}
+
+	// Fractured and null targets are rejected at the queue door.
+	Subsystem.QueueDestructibleImpact(Targets[0], FVector(0, 0, 100), 5000.0f);
+	Subsystem.QueueDestructibleImpact(nullptr, FVector::ZeroVector, 5000.0f);
+	TestEqual(TEXT("fractured and null targets are not queued"),
+		Subsystem.GetPendingDestructibleImpactCount(), 0);
 	return true;
 }
 

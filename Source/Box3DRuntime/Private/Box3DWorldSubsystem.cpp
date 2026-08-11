@@ -7,6 +7,7 @@
 #include "Box3DDebugDraw.h"
 #include "Box3DDestructibleComponent.h"
 #include "Box3DDestruction.h"
+#include "Box3DFracturedActor.h"
 #include "Box3DJointComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/Actor.h"
@@ -376,18 +377,93 @@ void UBox3DWorldSubsystem::UnregisterDestructible(UBox3DDestructibleComponent* C
 	Destructibles.Remove(Component);
 }
 
+void UBox3DWorldSubsystem::QueueDestructibleImpact(UBox3DDestructibleComponent* Destructible,
+	const FVector& WorldLocation, float EnergyJoules)
+{
+	if (Destructible == nullptr || Destructible->IsFractured())
+	{
+		return;
+	}
+	PendingDestructibleImpacts.Add({ Destructible, WorldLocation, EnergyJoules });
+}
+
 void UBox3DWorldSubsystem::DrainDestructibleImpacts()
 {
-	for (const FPendingDestructibleImpact& Impact : PendingDestructibleImpacts)
+	const float BudgetMs = GetDefault<UBox3DSettings>()->FractureTimeBudgetMs;
+	const double StartSeconds = FPlatformTime::Seconds();
+
+	int32 Processed = 0;
+	while (Processed < PendingDestructibleImpacts.Num())
 	{
+		const FPendingDestructibleImpact& Impact = PendingDestructibleImpacts[Processed];
+		++Processed;
 		if (UBox3DDestructibleComponent* Destructible = Impact.Destructible.Get())
 		{
 			// ApplyImpact re-checks IsFractured, so multiple impacts queued against
-			// one destructible in the same tick fracture it exactly once.
+			// one destructible fracture it exactly once.
 			Destructible->ApplyImpact(Impact.Location, Impact.EnergyJoules);
 		}
+		// At least one impact per tick, then stop once the budget is spent; the
+		// remainder stays queued, in order, for following ticks.
+		if (BudgetMs > 0.0f && (FPlatformTime::Seconds() - StartSeconds) * 1000.0 >= BudgetMs)
+		{
+			break;
+		}
 	}
-	PendingDestructibleImpacts.Reset();
+	PendingDestructibleImpacts.RemoveAt(0, Processed);
+}
+
+void UBox3DWorldSubsystem::RegisterFracturedActor(ABox3DFracturedActor* Actor)
+{
+	LiveFracturedActors.AddUnique(Actor);
+	EnforceFragmentPool();
+}
+
+void UBox3DWorldSubsystem::UnregisterFracturedActor(ABox3DFracturedActor* Actor)
+{
+	LiveFracturedActors.Remove(Actor);
+}
+
+int32 UBox3DWorldSubsystem::GetLiveFragmentCount() const
+{
+	int32 Total = 0;
+	for (const TWeakObjectPtr<ABox3DFracturedActor>& Weak : LiveFracturedActors)
+	{
+		if (const ABox3DFracturedActor* Actor = Weak.Get())
+		{
+			Total += Actor->CountFragmentsInTier(EBox3DFragmentTier::Body);
+		}
+	}
+	return Total;
+}
+
+void UBox3DWorldSubsystem::EnforceFragmentPool()
+{
+	const int32 Cap = GetDefault<UBox3DSettings>()->MaxLiveFragments;
+	if (Cap <= 0)
+	{
+		return;
+	}
+
+	int32 Total = GetLiveFragmentCount();
+	// Evict oldest first, but never the newest actor: a single fracture larger
+	// than the whole cap still gets to exist.
+	while (Total > Cap && LiveFracturedActors.Num() > 1)
+	{
+		const TWeakObjectPtr<ABox3DFracturedActor> OldestWeak = LiveFracturedActors[0];
+		ABox3DFracturedActor* Oldest = OldestWeak.Get();
+		if (Oldest == nullptr)
+		{
+			LiveFracturedActors.RemoveAt(0);
+			continue;
+		}
+		Total -= Oldest->CountFragmentsInTier(EBox3DFragmentTier::Body);
+		UE_LOG(LogBox3D, Verbose, TEXT("Fragment pool over cap (%d): evicting %s"), Cap, *GetNameSafe(Oldest));
+		Oldest->Destroy();
+		// EndPlay unregisters; the explicit Remove is a no-op then, and a guard
+		// against a pool entry that somehow never began play.
+		LiveFracturedActors.Remove(OldestWeak);
+	}
 }
 
 void UBox3DWorldSubsystem::PushKinematicTargets(float FixedDeltaTime)

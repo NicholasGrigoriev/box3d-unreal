@@ -40,6 +40,7 @@ ABox3DFracturedActor* UBox3DDestructibleComponent::ApplyImpact(FVector WorldLoca
 	Params.FragmentDensity = FragmentDensity;
 	Params.Tiers = TierThresholds;
 	Params.DebrisSpeed = DebrisSpeed;
+	Params.DebrisSystem = DebrisSystem;
 
 	ABox3DFracturedActor* Actor = Box3D::FractureMesh(Target, Params);
 	if (Actor == nullptr)
