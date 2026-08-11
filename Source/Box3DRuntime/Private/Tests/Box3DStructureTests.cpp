@@ -1,8 +1,9 @@
-// Tests for the D4 structural connectivity core: bond graph build from
-// fracture adjacency, anchor auto-detection against mirrored static geometry,
-// and the event-driven flood-fill that finds unsupported islands while
-// touching only the affected neighborhood (visit-counter bound). Island
-// promotion is D4 slice 2 and tested with it.
+// Tests for D4 structural connectivity: bond graph build from fracture
+// adjacency, anchor auto-detection against mirrored static geometry, the
+// event-driven flood-fill that finds unsupported islands while touching only
+// the affected neighborhood (visit-counter bound), and two-phase
+// static->dynamic island promotion on ABox3DFracturedActor (bridge and tower
+// scenarios, per-tick promotion budget with FIFO overflow).
 
 #include "Misc/AutomationTest.h"
 
@@ -30,6 +31,61 @@ namespace
 			Fragments[Index + 1].Neighbors.Add({ Index, Area });
 		}
 		return Fragments;
+	}
+
+	/// A 50 cm cube chunk centered at Center — hand-made fragment geometry for
+	/// structural assemblies whose shape the test controls exactly (no Voronoi
+	/// randomness). No faces: promotion tests need bodies and bonds, not
+	/// rendering.
+	FBox3DFragmentData MakeBoxChunk(const FVector& Center, double Half = 25.0)
+	{
+		FBox3DFragmentData Fragment;
+		for (int32 Corner = 0; Corner < 8; ++Corner)
+		{
+			Fragment.Vertices.Add(Center
+				+ FVector((Corner & 1) ? Half : -Half, (Corner & 2) ? Half : -Half, (Corner & 4) ? Half : -Half));
+		}
+		Fragment.Centroid = Center;
+		Fragment.Volume = 8.0 * Half * Half * Half;
+		return Fragment;
+	}
+
+	/// Symmetric bond between two chunks (full 50x50 cm shared face by default).
+	void BondChunks(TArray<FBox3DFragmentData>& Fragments, int32 A, int32 B, double Area = 2500.0)
+	{
+		Fragments[A].Neighbors.Add({ B, Area });
+		Fragments[B].Neighbors.Add({ A, Area });
+	}
+
+	/// Spawn a structural fractured actor from hand-made chunks at the world
+	/// origin (chunk space = world space).
+	ABox3DFracturedActor* SpawnStructuralActor(UWorld* World, TArray<FBox3DFragmentData>&& Fragments)
+	{
+		ABox3DFracturedActor* Actor = World->SpawnActor<ABox3DFracturedActor>();
+		Actor->bStructural = true;
+		Actor->InitializeFragments(MoveTemp(Fragments), nullptr);
+		return Actor;
+	}
+
+	bool ChunkIsStatic(const ABox3DFracturedActor& Actor, int32 Index)
+	{
+		const b3BodyId Body = Actor.GetFragmentBody(Index);
+		return b3Body_IsValid(Body) && b3Body_GetType(Body) == b3_staticBody;
+	}
+
+	bool ChunkIsDynamic(const ABox3DFracturedActor& Actor, int32 Index)
+	{
+		const b3BodyId Body = Actor.GetFragmentBody(Index);
+		return b3Body_IsValid(Body) && b3Body_GetType(Body) == b3_dynamicBody;
+	}
+
+	/// Mirrored ground plate with its top face at Z = 0 — the anchor surface for
+	/// structural assemblies (same pattern as the anchor-detect test).
+	void MirrorGroundPlate(Box3DTest::FTestWorld& Test)
+	{
+		Box3DTest::SpawnSceneMesh(Test.World, Box3DTest::LoadCubeMesh(),
+			FTransform(FQuat::Identity, FVector(0, 0, -50), FVector(8.0, 8.0, 1.0)));
+		Test.Subsystem().GetStaticMirror()->MirrorLevel(Test.World->PersistentLevel);
 	}
 
 	/// Three chunks, every pair bonded.
@@ -309,6 +365,144 @@ bool FBox3DStructureAnchorDetectTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("floating assembly has no anchors"),
 			Box3D::Structure::DetectAnchors(Graph, Test.B3World(), Bodies, 2.0f), 0);
 		TestEqual(TEXT("graph agrees"), Graph.GetAnchorCount(), 0);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DStructureBridgeTest,
+	"Box3DUnreal.Structure.BridgePromotion", BOX3D_TEST_FLAGS)
+bool FBox3DStructureBridgeTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FScopedMirrorSettings MirrorSettings;
+	Box3DTest::FScopedDestructionSettings DestructionSettings(0, 0.0f);
+	Box3DTest::FScopedPromotionBudget PromotionBudget(0);
+	Box3DTest::FTestWorld Test;
+	MirrorGroundPlate(Test);
+
+	// Two anchored piers with a span across them, 50 cm cube chunks:
+	//   0 = pier A base (on ground), 1 = pier A top,
+	//   2..4 = span, 5 = pier B top, 6 = pier B base (on ground).
+	TArray<FBox3DFragmentData> Chunks;
+	Chunks.Add(MakeBoxChunk(FVector(0, 0, 25)));
+	Chunks.Add(MakeBoxChunk(FVector(0, 0, 75)));
+	Chunks.Add(MakeBoxChunk(FVector(50, 0, 75)));
+	Chunks.Add(MakeBoxChunk(FVector(100, 0, 75)));
+	Chunks.Add(MakeBoxChunk(FVector(150, 0, 75)));
+	Chunks.Add(MakeBoxChunk(FVector(200, 0, 75)));
+	Chunks.Add(MakeBoxChunk(FVector(200, 0, 25)));
+	for (int32 Index = 0; Index < 6; ++Index)
+	{
+		BondChunks(Chunks, Index, Index + 1);
+	}
+
+	ABox3DFracturedActor* Bridge = SpawnStructuralActor(Test.World, MoveTemp(Chunks));
+	TestTrue(TEXT("structural mode live"), Bridge->IsStructureActive());
+	TestTrue(TEXT("pier bases anchored"),
+		Bridge->GetStructureGraph().IsAnchor(0) && Bridge->GetStructureGraph().IsAnchor(6));
+	TestEqual(TEXT("only the bases anchor"), Bridge->GetStructureGraph().GetAnchorCount(), 2);
+	bool bAllStatic = true;
+	for (int32 Index = 0; Index < 7; ++Index)
+	{
+		bAllStatic &= ChunkIsStatic(*Bridge, Index);
+	}
+	TestTrue(TEXT("anchored assembly starts fully static"), bAllStatic);
+
+	// Destroy pier A's top chunk: the span is still carried by pier B —
+	// redundant support, nothing promotes.
+	Bridge->DestroyFragment(1);
+	TestEqual(TEXT("redundant support queues nothing"), Bridge->GetPendingPromotionCount(), 0);
+	Bridge->ProcessPromotions();
+	TestTrue(TEXT("span still static via pier B"),
+		ChunkIsStatic(*Bridge, 2) && ChunkIsStatic(*Bridge, 3) && ChunkIsStatic(*Bridge, 4));
+	TestFalse(TEXT("destroyed chunk's body is gone"), b3Body_IsValid(Bridge->GetFragmentBody(1)));
+
+	// Destroy pier B's top chunk: the span loses its last anchor path — exactly
+	// the island {2,3,4} promotes; the anchored piers stay static.
+	Bridge->DestroyFragment(5);
+	TestEqual(TEXT("exactly the span is queued"), Bridge->GetPendingPromotionCount(), 3);
+	Bridge->ProcessPromotions();
+	TestTrue(TEXT("span island promoted to dynamic"),
+		ChunkIsDynamic(*Bridge, 2) && ChunkIsDynamic(*Bridge, 3) && ChunkIsDynamic(*Bridge, 4));
+	TestTrue(TEXT("anchored side stays static"), ChunkIsStatic(*Bridge, 0) && ChunkIsStatic(*Bridge, 6));
+	TestEqual(TEXT("queue drained"), Bridge->GetPendingPromotionCount(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DStructureTowerTest,
+	"Box3DUnreal.Structure.TowerPromotion", BOX3D_TEST_FLAGS)
+bool FBox3DStructureTowerTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FScopedMirrorSettings MirrorSettings;
+	Box3DTest::FScopedDestructionSettings DestructionSettings(0, 0.0f);
+	Box3DTest::FScopedPromotionBudget PromotionBudget(0);
+	Box3DTest::FTestWorld Test;
+	MirrorGroundPlate(Test);
+
+	// Column of four chunks, only the base on the ground.
+	TArray<FBox3DFragmentData> Chunks;
+	for (int32 Index = 0; Index < 4; ++Index)
+	{
+		Chunks.Add(MakeBoxChunk(FVector(0, 0, 25 + Index * 50)));
+		if (Index > 0)
+		{
+			BondChunks(Chunks, Index - 1, Index);
+		}
+	}
+
+	ABox3DFracturedActor* Tower = SpawnStructuralActor(Test.World, MoveTemp(Chunks));
+	TestTrue(TEXT("structural mode live"), Tower->IsStructureActive());
+	TestEqual(TEXT("only the base anchors"), Tower->GetStructureGraph().GetAnchorCount(), 1);
+	TestTrue(TEXT("base is the anchor"), Tower->GetStructureGraph().IsAnchor(0));
+
+	// Destroy the base: the whole remaining column strands in one event.
+	Tower->DestroyFragment(0);
+	TestEqual(TEXT("whole column queued by one event"), Tower->GetPendingPromotionCount(), 3);
+	Tower->ProcessPromotions();
+	TestTrue(TEXT("whole column promoted"),
+		ChunkIsDynamic(*Tower, 1) && ChunkIsDynamic(*Tower, 2) && ChunkIsDynamic(*Tower, 3));
+	TestEqual(TEXT("queue drained"), Tower->GetPendingPromotionCount(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DStructurePromotionBudgetTest,
+	"Box3DUnreal.Structure.PromotionBudget", BOX3D_TEST_FLAGS)
+bool FBox3DStructurePromotionBudgetTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FScopedMirrorSettings MirrorSettings;
+	Box3DTest::FScopedDestructionSettings DestructionSettings(0, 0.0f);
+	Box3DTest::FScopedPromotionBudget PromotionBudget(1);
+	Box3DTest::FTestWorld Test;
+	MirrorGroundPlate(Test);
+
+	// Five-chunk tower; destroying the base queues four promotions against a
+	// budget of one per pump.
+	TArray<FBox3DFragmentData> Chunks;
+	for (int32 Index = 0; Index < 5; ++Index)
+	{
+		Chunks.Add(MakeBoxChunk(FVector(0, 0, 25 + Index * 50)));
+		if (Index > 0)
+		{
+			BondChunks(Chunks, Index - 1, Index);
+		}
+	}
+
+	ABox3DFracturedActor* Tower = SpawnStructuralActor(Test.World, MoveTemp(Chunks));
+	TestTrue(TEXT("structural mode live"), Tower->IsStructureActive());
+	Tower->DestroyFragment(0);
+	TestEqual(TEXT("four chunks queued"), Tower->GetPendingPromotionCount(), 4);
+
+	// FIFO under budget: exactly one chunk per pump, in island (ascending) order.
+	for (int32 Pump = 1; Pump <= 4; ++Pump)
+	{
+		Tower->ProcessPromotions();
+		TestEqual(FString::Printf(TEXT("pump %d leaves %d queued"), Pump, 4 - Pump),
+			Tower->GetPendingPromotionCount(), 4 - Pump);
+		bool bOrderRespected = true;
+		for (int32 Index = 1; Index <= 4; ++Index)
+		{
+			bOrderRespected &= Index <= Pump ? ChunkIsDynamic(*Tower, Index) : ChunkIsStatic(*Tower, Index);
+		}
+		TestTrue(FString::Printf(TEXT("pump %d promoted the FIFO head only"), Pump), bOrderRespected);
 	}
 	return true;
 }

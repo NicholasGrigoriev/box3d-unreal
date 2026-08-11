@@ -11,7 +11,16 @@
 //   box3d.Fracture [CellCount=12] [Seed=42] [Toughness=50]
 // Fractures the static mesh under the crosshair for real via
 // Box3D::FractureMesh — welded rubble that scatters when welds snap.
+//   box3d.SpawnStructure [CellCount=16] [Seed=42] [Toughness=50]
+// Spawns an anchored wall + cantilever beam ahead of the player and fractures
+// both structurally (D4): chunks stay static until connectivity strands them.
+// Needs mirrored/baked static ground for anchoring. Knock chunks out with
+// box3d.DestroyChunk.
+//   box3d.DestroyChunk
+// Destroys the fractured chunk under the crosshair (box3d ray cast) — the
+// structural island promotion eyeball: shoot the beam, watch the overhang fall.
 
+#include "Box3DConversion.h"
 #include "Box3DDestructibleComponent.h"
 #include "Box3DFracture.h"
 #include "Box3DFracturedActor.h"
@@ -22,9 +31,11 @@
 #include "DrawDebugHelpers.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
 #include "TimerManager.h"
+#include "box3d/box3d.h"
 
 #if !UE_BUILD_SHIPPING
 
@@ -207,6 +218,133 @@ static FAutoConsoleCommandWithWorldAndArgs GBox3DDestructionStressCommand(
 		UE_LOG(LogBox3D, Log,
 			TEXT("box3d.DestructionStress: %d destructible cubes queued over 1 s (budget %.2f ms/tick, pool cap %d)"),
 			Count, GetDefault<UBox3DSettings>()->FractureTimeBudgetMs, GetDefault<UBox3DSettings>()->MaxLiveFragments);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GBox3DSpawnStructureCommand(
+	TEXT("box3d.SpawnStructure"),
+	TEXT("Spawn an anchored wall + cantilever beam ahead of the player, structurally fractured (D4). Usage: box3d.SpawnStructure [CellCount=16] [Seed=42] [Toughness=50]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		const APlayerController* PC = World != nullptr ? World->GetFirstPlayerController() : nullptr;
+		UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+		if (PC == nullptr || Cube == nullptr)
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("box3d.SpawnStructure: needs a player and engine content"));
+			return;
+		}
+
+		FVector ViewLocation;
+		FRotator ViewRotation;
+		PC->GetPlayerViewPoint(ViewLocation, ViewRotation);
+		const FVector Forward = FVector(ViewRotation.Vector().X, ViewRotation.Vector().Y, 0.0).GetSafeNormal();
+		const FVector Right = FVector::CrossProduct(FVector::UpVector, Forward);
+
+		// Ground the assembly on whatever is under the spawn spot; fall back to
+		// the player's feet if nothing traces.
+		const FVector Ahead = ViewLocation + Forward * 500.0;
+		FHitResult Hit;
+		double GroundZ = ViewLocation.Z - 100.0;
+		if (World->LineTraceSingleByChannel(Hit, Ahead + FVector(0, 0, 100), Ahead - FVector(0, 0, 3000),
+				ECC_Visibility))
+		{
+			GroundZ = Hit.ImpactPoint.Z;
+		}
+
+		FBox3DFractureMeshParams Params;
+		Params.Fracture.CellCount = FMath::Clamp(Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 16, 1, 256);
+		Params.Fracture.Seed = Args.Num() > 1 ? FCString::Atoi(*Args[1]) : 42;
+		Params.MaterialToughness = Args.Num() > 2 ? FCString::Atof(*Args[2]) : 50.0f;
+		Params.bStructural = true;
+
+		// Wall facing the player (long axis along Right), then a beam resting on
+		// its top edge, cantilevered toward the player — the beam anchors on the
+		// wall's static chunks, the overhang hangs off its bonds.
+		const FQuat WallRot = FRotationMatrix::MakeFromXZ(Right, FVector::UpVector).ToQuat();
+		const auto SpawnAndFracture = [&](const FTransform& Transform) -> ABox3DFracturedActor*
+		{
+			AActor* Actor = World->SpawnActor<AActor>();
+			UStaticMeshComponent* Mesh = NewObject<UStaticMeshComponent>(Actor, TEXT("StructureMesh"));
+			Mesh->SetMobility(EComponentMobility::Movable);
+			Mesh->SetStaticMesh(Cube);
+			Mesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+			Actor->SetRootComponent(Mesh);
+			Mesh->SetWorldTransform(Transform);
+			Mesh->RegisterComponent();
+			Params.Fracture.ImpactPoint = Transform.GetLocation();
+			return Box3D::FractureMesh(Mesh, Params);
+		};
+
+		// 300 x 40 x 200 cm wall standing on the ground.
+		ABox3DFracturedActor* Wall = SpawnAndFracture(FTransform(WallRot,
+			FVector(Ahead.X, Ahead.Y, GroundZ + 100.0), FVector(3.0, 0.4, 2.0)));
+		// 300 x 40 x 40 cm beam across the wall top, cantilevered toward the player.
+		ABox3DFracturedActor* Beam = SpawnAndFracture(FTransform(
+			FRotationMatrix::MakeFromXZ(Forward, FVector::UpVector).ToQuat(),
+			FVector(Ahead.X, Ahead.Y, GroundZ + 220.0) - Forward * 100.0, FVector(3.0, 0.4, 0.4)));
+
+		if (Wall == nullptr || Beam == nullptr)
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("box3d.SpawnStructure: fracture failed"));
+			return;
+		}
+		if (!Wall->IsStructureActive())
+		{
+			UE_LOG(LogBox3D, Warning,
+				TEXT("box3d.SpawnStructure: wall found no anchors — is the ground mirrored or baked "
+					 "(bMirrorStaticGeometry / bUseBakedStaticCollision)?"));
+		}
+		UE_LOG(LogBox3D, Log,
+			TEXT("box3d.SpawnStructure: wall %d chunks (structural %d), beam %d chunks (structural %d). "
+				 "Knock chunks out with box3d.DestroyChunk."),
+			Wall->GetFragmentCount(), Wall->IsStructureActive() ? 1 : 0,
+			Beam->GetFragmentCount(), Beam->IsStructureActive() ? 1 : 0);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GBox3DDestroyChunkCommand(
+	TEXT("box3d.DestroyChunk"),
+	TEXT("Destroy the fractured chunk under the crosshair (box3d ray cast). Usage: box3d.DestroyChunk"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		const APlayerController* PC = World != nullptr ? World->GetFirstPlayerController() : nullptr;
+		UBox3DWorldSubsystem* Subsystem = World != nullptr ? World->GetSubsystem<UBox3DWorldSubsystem>() : nullptr;
+		if (PC == nullptr || Subsystem == nullptr || !b3World_IsValid(Subsystem->GetBox3DWorldId()))
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("box3d.DestroyChunk: needs a player and a Box3D world"));
+			return;
+		}
+
+		FVector ViewLocation;
+		FRotator ViewRotation;
+		PC->GetPlayerViewPoint(ViewLocation, ViewRotation);
+
+		b3QueryFilter Filter = b3DefaultQueryFilter();
+		Filter.categoryBits = UINT64_MAX;
+		Filter.maskBits = UINT64_MAX;
+		const b3RayResult Result = b3World_CastRayClosest(Subsystem->GetBox3DWorldId(),
+			Box3D::ToB3Pos(ViewLocation), Box3D::ToB3(ViewRotation.Vector() * 10000.0), Filter);
+		if (!Result.hit)
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("box3d.DestroyChunk: nothing under the crosshair"));
+			return;
+		}
+
+		const uint64 HitBody = b3StoreBodyId(b3Shape_GetBody(Result.shapeId));
+		for (TActorIterator<ABox3DFracturedActor> It(World); It; ++It)
+		{
+			for (int32 Index = 0; Index < It->GetFragmentCount(); ++Index)
+			{
+				const b3BodyId Body = It->GetFragmentBody(Index);
+				if (b3Body_IsValid(Body) && b3StoreBodyId(Body) == HitBody)
+				{
+					It->DestroyFragment(Index);
+					UE_LOG(LogBox3D, Log,
+						TEXT("box3d.DestroyChunk: %s chunk %d destroyed (%d promotions queued)"),
+						*GetNameSafe(*It), Index, It->GetPendingPromotionCount());
+					return;
+				}
+			}
+		}
+		UE_LOG(LogBox3D, Warning, TEXT("box3d.DestroyChunk: hit body is not a fractured chunk"));
 	}));
 
 #endif // !UE_BUILD_SHIPPING

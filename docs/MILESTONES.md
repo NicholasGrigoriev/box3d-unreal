@@ -255,6 +255,21 @@ on forced rollback, and carries a 1 m authoritative correction through replay.
       `QueueDestructibleImpact` API, `box3d.DestructionStress`;
       6 automation tests (88 total).
 
+- [x] **D4 — structural connectivity (Teardown tier)** ✅ 2026-08-12 —
+      `Box3D::Structure`: per-assembly bond graph (nodes = chunks, bonds =
+      shared-face area + health, canonical pair order), auto-anchors via
+      static-overlap query (`DetectAnchors`, own bodies excluded),
+      event-driven flood-fill on chunk-destroyed / bond-broken with
+      early-out on anchors or already-proven regions (visit-count bound).
+      Structural mode on `ABox3DFracturedActor` (`bStructural`): chunks
+      spawn static, weld breaks feed `NotifyBondBroken`,
+      `DestroyFragment` feeds `NotifyChunkDestroyed`, unsupported islands
+      promote static→dynamic two-phase (flip whole batch, then wake) with
+      intra-island welds kept, under `MaxPromotionsPerTick` (FIFO
+      overflow); no-anchor assemblies fall back to dynamic rubble.
+      `box3d.SpawnStructure` + `box3d.DestroyChunk`;
+      7 automation tests (95 total).
+
 ---
 
 ## Non-goals (for now)

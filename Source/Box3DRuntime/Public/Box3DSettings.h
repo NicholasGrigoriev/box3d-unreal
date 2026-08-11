@@ -128,6 +128,13 @@ public:
 	UPROPERTY(EditAnywhere, config, Category = "Destruction", meta = (ClampMin = "0"))
 	float FractureTimeBudgetMs = 2.0f;
 
+	/// Max static->dynamic chunk promotions per tick when a structural assembly
+	/// loses support (D4). Chunks over the budget stay queued FIFO and promote on
+	/// following ticks, so one huge collapse cannot spike a single frame.
+	/// 0 = unlimited. Read live each tick.
+	UPROPERTY(EditAnywhere, config, Category = "Destruction", meta = (ClampMin = "0"))
+	int32 MaxPromotionsPerTick = 64;
+
 	/// Convert every placed static-mesh actor whose root simulates Chaos physics
 	/// into a Box3D prop (ABox3DPropActor) when a game world starts and when
 	/// levels stream in. "Simulate Physics" on a placed actor thereby becomes the

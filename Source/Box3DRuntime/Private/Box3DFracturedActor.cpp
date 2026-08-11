@@ -4,6 +4,7 @@
 #include "Box3DCooking.h"
 #include "Box3DTypes.h"
 #include "Box3DRuntime.h"
+#include "Box3DSettings.h"
 #include "Box3DStaticSceneMirror.h"
 #include "Box3DWorldSubsystem.h"
 #include "Components/StaticMeshComponent.h"
@@ -275,6 +276,7 @@ void ABox3DFracturedActor::InitializeFragments(TArray<FBox3DFragmentData>&& InFr
 	}
 
 	BuildFragmentPhysics();
+	InitializeStructure();
 
 	// Join the fragment pool last: registration may evict older fractured actors
 	// to make room, and this actor's own footprint must be final by then.
@@ -356,7 +358,9 @@ void ABox3DFracturedActor::BuildFragmentPhysics()
 		}
 
 		b3BodyDef BodyDef = b3DefaultBodyDef();
-		BodyDef.type = b3_dynamicBody;
+		// Structural assemblies hold still until connectivity says otherwise —
+		// promotion flips unsupported islands to dynamic later.
+		BodyDef.type = bStructural ? b3_staticBody : b3_dynamicBody;
 		BodyDef.position = Box3D::ToB3Pos(ActorTransform.TransformPosition(Fragment.Centroid));
 		BodyDef.rotation = Box3D::ToB3(ActorTransform.GetRotation());
 		BodyDef.isAwake = !bStartAsleep;
@@ -431,6 +435,158 @@ int32 ABox3DFracturedActor::CountFragmentsInTier(EBox3DFragmentTier Tier) const
 	return Count;
 }
 
+void ABox3DFracturedActor::InitializeStructure()
+{
+	bStructureActive = false;
+	StructureGraph.Reset();
+	PendingPromotions.Reset();
+	if (!bStructural)
+	{
+		return;
+	}
+
+	UBox3DWorldSubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UBox3DWorldSubsystem>() : nullptr;
+	if (Subsystem == nullptr || !b3World_IsValid(Subsystem->GetBox3DWorldId()))
+	{
+		return;
+	}
+
+	StructureGraph.Build(Fragments);
+	const int32 AnchorCount =
+		Box3D::Structure::DetectAnchors(StructureGraph, Subsystem->GetBox3DWorldId(), FragmentBodies);
+	if (AnchorCount == 0)
+	{
+		// Nothing holds this assembly to the world — it is not a structure, just
+		// rubble. Revert to the plain dynamic behavior instead of promoting
+		// everything through the budget one tick late.
+		UE_LOG(LogBox3D, Log, TEXT("%s: structural assembly found no anchors; falling back to dynamic rubble"),
+			*GetNameSafe(this));
+		StructureGraph.Reset();
+		for (const b3BodyId Body : FragmentBodies)
+		{
+			if (b3Body_IsValid(Body))
+			{
+				b3Body_SetType(Body, b3_dynamicBody);
+				if (!bStartAsleep)
+				{
+					b3Body_SetAwake(Body, true);
+				}
+			}
+		}
+		return;
+	}
+	bStructureActive = true;
+
+	// Bodiless fragments (non-Body tiers, failed hull cooks) exist as graph
+	// nodes but cannot carry load — mark them destroyed up front. Any islands
+	// this strands are queued like any other unsupported chunks.
+	Box3D::Structure::FBox3DStructureIslands Islands;
+	for (int32 Index = 0; Index < Fragments.Num(); ++Index)
+	{
+		if (!FragmentBodies.IsValidIndex(Index) || !b3Body_IsValid(FragmentBodies[Index]))
+		{
+			StructureGraph.NotifyChunkDestroyed(Index, Islands);
+		}
+	}
+	EnqueueIslands(Islands);
+
+	UE_LOG(LogBox3D, Log, TEXT("%s: structural assembly live — %d chunks, %d bonds, %d anchors"),
+		*GetNameSafe(this), StructureGraph.GetNodeCount(), StructureGraph.GetBondCount(), AnchorCount);
+}
+
+void ABox3DFracturedActor::EnqueueIslands(const Box3D::Structure::FBox3DStructureIslands& Islands)
+{
+	for (const TArray<int32>& Island : Islands.Islands)
+	{
+		PendingPromotions.Append(Island);
+	}
+}
+
+void ABox3DFracturedActor::ProcessPromotions()
+{
+	if (PendingPromotions.IsEmpty())
+	{
+		return;
+	}
+	const int32 BudgetSetting = GetDefault<UBox3DSettings>()->MaxPromotionsPerTick;
+	int32 Budget = BudgetSetting > 0 ? BudgetSetting : MAX_int32;
+
+	// Phase 1: flip the whole batch static->dynamic before waking anything, so
+	// no weld connects a static body to an awake dynamic one mid-pass.
+	TArray<b3BodyId, TInlineAllocator<64>> Promoted;
+	int32 Consumed = 0;
+	while (Consumed < PendingPromotions.Num() && Budget > 0)
+	{
+		const b3BodyId Body = GetFragmentBody(PendingPromotions[Consumed++]);
+		// Stale entries (destroyed or already-promoted chunks) cost no budget.
+		if (!b3Body_IsValid(Body) || b3Body_GetType(Body) != b3_staticBody)
+		{
+			continue;
+		}
+		b3Body_SetType(Body, b3_dynamicBody);
+		Promoted.Add(Body);
+		--Budget;
+	}
+	PendingPromotions.RemoveAt(0, Consumed);
+
+	// Phase 2: wake the batch and let physics take over.
+	for (const b3BodyId Body : Promoted)
+	{
+		b3Body_SetAwake(Body, true);
+	}
+}
+
+void ABox3DFracturedActor::DestroyFragment(int32 FragmentIndex)
+{
+	if (!Fragments.IsValidIndex(FragmentIndex)
+		|| (bStructureActive && StructureGraph.IsChunkDestroyed(FragmentIndex)))
+	{
+		return;
+	}
+
+	for (int32 Index = Welds.Num() - 1; Index >= 0; --Index)
+	{
+		const FWeld& Weld = Welds[Index];
+		if (Weld.FragmentA == FragmentIndex || Weld.FragmentB == FragmentIndex)
+		{
+			if (b3Joint_IsValid(Weld.Joint))
+			{
+				b3DestroyJoint(Weld.Joint, /*wakeAttached*/ true);
+			}
+			Welds.RemoveAtSwap(Index);
+		}
+	}
+
+	if (FragmentBodies.IsValidIndex(FragmentIndex) && b3Body_IsValid(FragmentBodies[FragmentIndex]))
+	{
+		b3DestroyBody(FragmentBodies[FragmentIndex]);
+		FragmentBodies[FragmentIndex] = b3BodyId{};
+	}
+
+	if (FragmentSections.IsValidIndex(FragmentIndex))
+	{
+		for (const int32 Section : { FragmentSections[FragmentIndex].X, FragmentSections[FragmentIndex].Y })
+		{
+			if (Section != INDEX_NONE)
+			{
+				Mesh->ClearMeshSection(Section);
+			}
+		}
+		FragmentSections[FragmentIndex] = FIntPoint(INDEX_NONE, INDEX_NONE);
+	}
+	SectionGeometry.RemoveAll([FragmentIndex](const FSectionGeometry& Section)
+	{
+		return Section.FragmentIndex == FragmentIndex;
+	});
+
+	if (bStructureActive)
+	{
+		Box3D::Structure::FBox3DStructureIslands Islands;
+		StructureGraph.NotifyChunkDestroyed(FragmentIndex, Islands);
+		EnqueueIslands(Islands);
+	}
+}
+
 void ABox3DFracturedActor::DestroyFragmentPhysics()
 {
 	for (const FWeld& Weld : Welds)
@@ -450,6 +606,10 @@ void ABox3DFracturedActor::DestroyFragmentPhysics()
 		}
 	}
 	FragmentBodies.Empty();
+
+	bStructureActive = false;
+	StructureGraph.Reset();
+	PendingPromotions.Empty();
 }
 
 void ABox3DFracturedActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -466,12 +626,14 @@ void ABox3DFracturedActor::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 	CheckWelds();
+	ProcessPromotions();
 	SyncFragments();
 }
 
 void ABox3DFracturedActor::CheckWelds()
 {
 	bool bAnyBroke = false;
+	TArray<FIntPoint, TInlineAllocator<8>> BrokenPairs;
 	for (int32 Index = Welds.Num() - 1; Index >= 0; --Index)
 	{
 		const FWeld& Weld = Welds[Index];
@@ -484,10 +646,24 @@ void ABox3DFracturedActor::CheckWelds()
 			&& Box3D::ToUEDir(b3Joint_GetConstraintForce(Weld.Joint)).Size() > Weld.BreakForce)
 		{
 			b3DestroyJoint(Weld.Joint, /*wakeAttached*/ true);
+			if (bStructureActive)
+			{
+				BrokenPairs.Emplace(Weld.FragmentA, Weld.FragmentB);
+			}
 			Welds.RemoveAtSwap(Index);
 			bAnyBroke = true;
 		}
 	}
+
+	// Weld breaks are the bond-break events of the structure graph: each snap
+	// floods the affected neighborhood and queues stranded islands.
+	for (const FIntPoint& Pair : BrokenPairs)
+	{
+		Box3D::Structure::FBox3DStructureIslands Islands;
+		StructureGraph.NotifyBondBroken(StructureGraph.FindBond(Pair.X, Pair.Y), Islands);
+		EnqueueIslands(Islands);
+	}
+
 	if (bAnyBroke)
 	{
 		OnWeldBroken.Broadcast();
@@ -638,6 +814,7 @@ namespace Box3D
 		Actor->MaterialToughness = Params.MaterialToughness;
 		Actor->FragmentDensity = Params.FragmentDensity;
 		Actor->bStartAsleep = Params.bStartAsleep;
+		Actor->bStructural = Params.bStructural;
 		Actor->TierThresholds = Params.Tiers;
 		Actor->DebrisSpeed = Params.DebrisSpeed;
 		Actor->DebrisSystem = Params.DebrisSystem;

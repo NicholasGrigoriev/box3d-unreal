@@ -99,6 +99,26 @@ namespace Box3DTest
 		}
 	};
 
+	/// Temporarily override the D4 per-tick promotion budget (0 = unlimited).
+	/// Read live in ProcessPromotions, so the scope only needs to cover the
+	/// promotion pumps under test.
+	struct FScopedPromotionBudget
+	{
+		int32 Saved;
+
+		explicit FScopedPromotionBudget(int32 MaxPromotionsPerTick)
+		{
+			UBox3DSettings* Settings = GetMutableDefault<UBox3DSettings>();
+			Saved = Settings->MaxPromotionsPerTick;
+			Settings->MaxPromotionsPerTick = MaxPromotionsPerTick;
+		}
+
+		~FScopedPromotionBudget()
+		{
+			GetMutableDefault<UBox3DSettings>()->MaxPromotionsPerTick = Saved;
+		}
+	};
+
 	/// Temporarily force interpolated body transforms on or off (read live each
 	/// Tick, so the scope only needs to cover the ticks under test). Tests that
 	/// assert exact post-step positions must force it OFF: the project config can
