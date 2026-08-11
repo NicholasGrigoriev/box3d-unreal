@@ -30,6 +30,11 @@ namespace Box3D
 	/// clone the data, so this cache is purely a cook-cost saver.
 	BOX3DRUNTIME_API const b3HullData* GetOrCreateHullData(UStaticMesh* Mesh);
 
+	/// LOD0 render-vertex positions in UE cm, unscaled, no caching. Returns false
+	/// when render data is inaccessible — packaged builds strip CPU vertex data
+	/// unless the mesh opts into bAllowCPUAccess, so treat this as editor-only.
+	BOX3DRUNTIME_API bool GetRenderVertexPositions(UStaticMesh* Mesh, TArray<FVector>& OutPositions);
+
 	/// Destroy all cooked data. Only safe when no Box3D worlds exist (module shutdown).
 	void FlushCookedDataCaches();
 }

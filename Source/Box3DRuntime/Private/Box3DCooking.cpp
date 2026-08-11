@@ -219,6 +219,34 @@ namespace Box3D
 		return Hull;
 	}
 
+	bool GetRenderVertexPositions(UStaticMesh* Mesh, TArray<FVector>& OutPositions)
+	{
+		if (Mesh == nullptr)
+		{
+			return false;
+		}
+
+		const FStaticMeshRenderData* RenderData = Mesh->GetRenderData();
+		if (RenderData == nullptr || RenderData->LODResources.IsEmpty())
+		{
+			return false;
+		}
+
+		const FPositionVertexBuffer& Positions = RenderData->LODResources[0].VertexBuffers.PositionVertexBuffer;
+		const int32 VertexCount = Positions.GetNumVertices();
+		if (VertexCount < 4)
+		{
+			return false;
+		}
+
+		OutPositions.Reserve(OutPositions.Num() + VertexCount);
+		for (int32 Index = 0; Index < VertexCount; ++Index)
+		{
+			OutPositions.Add(FVector(Positions.VertexPosition(Index)));
+		}
+		return true;
+	}
+
 	void FlushCookedDataCaches()
 	{
 		for (const TPair<FObjectKey, b3MeshData*>& Pair : GMeshCache)
