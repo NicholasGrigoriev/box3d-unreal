@@ -22,6 +22,7 @@ public:
 	int32 SensorBeginCount = 0;
 	int32 SensorEndCount = 0;
 	int32 JointBrokeCount = 0;
+	int32 WeldBrokeCount = 0;
 
 	UPROPERTY()
 	TObjectPtr<UBox3DBodyComponent> LastContactOther;
@@ -70,5 +71,11 @@ public:
 	void HandleJointBroke(UBox3DJointComponent* Joint)
 	{
 		++JointBrokeCount;
+	}
+
+	UFUNCTION()
+	void HandleWeldBroke()
+	{
+		++WeldBrokeCount;
 	}
 };

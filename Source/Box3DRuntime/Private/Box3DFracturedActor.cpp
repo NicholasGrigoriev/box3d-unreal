@@ -2,6 +2,7 @@
 
 #include "Box3DConversion.h"
 #include "Box3DCooking.h"
+#include "Box3DTypes.h"
 #include "Box3DRuntime.h"
 #include "Box3DStaticSceneMirror.h"
 #include "Box3DWorldSubsystem.h"
@@ -11,6 +12,7 @@
 #include "Materials/MaterialInterface.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "ProceduralMeshComponent.h"
+#include "box3d/box3d.h"
 #include "box3d/collision.h"
 
 namespace
@@ -204,7 +206,7 @@ namespace
 
 ABox3DFracturedActor::ABox3DFracturedActor()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	PrimaryActorTick.bCanEverTick = true;
 
 	Mesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("FracturedMesh"));
 	Mesh->SetMobility(EComponentMobility::Movable);
@@ -215,6 +217,9 @@ ABox3DFracturedActor::ABox3DFracturedActor()
 void ABox3DFracturedActor::InitializeFragments(TArray<FBox3DFragmentData>&& InFragments,
 	UMaterialInterface* SourceMaterial)
 {
+	DestroyFragmentPhysics();
+	SectionGeometry.Reset();
+
 	Fragments = MoveTemp(InFragments);
 	FragmentSections.Init(FIntPoint(INDEX_NONE, INDEX_NONE), Fragments.Num());
 	Mesh->ClearAllMeshSections();
@@ -241,11 +246,227 @@ void ABox3DFracturedActor::InitializeFragments(TArray<FBox3DFragmentData>&& InFr
 			Mesh->CreateMeshSection_LinearColor(SectionIndex, Batch.Vertices, Batch.Triangles, Batch.Normals,
 				Batch.UVs, TArray<FLinearColor>(), TArray<FProcMeshTangent>(), /*bCreateCollision*/ false);
 			Mesh->SetMaterial(SectionIndex, Material);
+
+			FSectionGeometry& Geometry = SectionGeometry.AddDefaulted_GetRef();
+			Geometry.SectionIndex = SectionIndex;
+			Geometry.FragmentIndex = FragmentIndex;
+			Geometry.LocalVertices.Reserve(Batch.Vertices.Num());
+			for (const FVector& Vertex : Batch.Vertices)
+			{
+				Geometry.LocalVertices.Add(Vertex - Fragment.Centroid);
+			}
+			Geometry.LocalNormals = Batch.Normals;
 			return SectionIndex++;
 		};
 
 		FragmentSections[FragmentIndex].X = CreateSection(Exterior, SourceMaterial);
 		FragmentSections[FragmentIndex].Y = CreateSection(Interior, InteriorMaterial);
+	}
+
+	BuildFragmentPhysics();
+}
+
+void ABox3DFracturedActor::BuildFragmentPhysics()
+{
+	UBox3DWorldSubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UBox3DWorldSubsystem>() : nullptr;
+	if (Subsystem == nullptr || !b3World_IsValid(Subsystem->GetBox3DWorldId()))
+	{
+		return;
+	}
+	const b3WorldId WorldId = Subsystem->GetBox3DWorldId();
+	const FTransform ActorTransform = GetActorTransform();
+
+	FragmentBodies.Init(b3BodyId{}, Fragments.Num());
+	TArray<b3Vec3> Points;
+	for (int32 Index = 0; Index < Fragments.Num(); ++Index)
+	{
+		const FBox3DFragmentData& Fragment = Fragments[Index];
+		// Hull points are centroid-relative so the body origin is the center of
+		// mass and the spawn frame matches the actor frame.
+		Points.Reset();
+		Points.Reserve(Fragment.Vertices.Num());
+		for (const FVector& Vertex : Fragment.Vertices)
+		{
+			Points.Add(Box3D::ToB3(Vertex - Fragment.Centroid));
+		}
+		// b3CreateHull convexifies merged (possibly non-convex) fragment unions;
+		// 64 matches the cooking hull budget.
+		b3HullData* Hull = b3CreateHull(Points.GetData(), Points.Num(), 64);
+		if (Hull == nullptr)
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("%s: fragment %d hull cook failed (%d verts); fragment stays visual-only"),
+				*GetNameSafe(this), Index, Fragment.Vertices.Num());
+			continue;
+		}
+
+		b3BodyDef BodyDef = b3DefaultBodyDef();
+		BodyDef.type = b3_dynamicBody;
+		BodyDef.position = Box3D::ToB3Pos(ActorTransform.TransformPosition(Fragment.Centroid));
+		BodyDef.rotation = Box3D::ToB3(ActorTransform.GetRotation());
+		BodyDef.isAwake = !bStartAsleep;
+		BodyDef.name = "Box3DFragment";
+		// userData stays null: Box3D::ResolveComponent casts it to UObject on
+		// every query hit, so raw bodies must never carry anything else.
+		const b3BodyId Body = b3CreateBody(WorldId, &BodyDef);
+
+		b3ShapeDef ShapeDef = b3DefaultShapeDef();
+		ShapeDef.density = FMath::Max(FragmentDensity, 1.0f);
+		ShapeDef.filter.categoryBits = 1ull << static_cast<int32>(EBox3DChannel::Debris);
+		ShapeDef.filter.maskBits = UINT64_MAX;
+		// Hull shapes clone the data, so the temp cook is freed immediately.
+		b3CreateHullShape(Body, &ShapeDef, Hull);
+		b3DestroyHull(Hull);
+		FragmentBodies[Index] = Body;
+	}
+
+	// One weld per adjacent pair, walked in fixed order; the lower index owns
+	// the pair (Neighbors is symmetric with canonical shared areas). Joint
+	// frames anchor at the centroid midpoint, matching ABox3DBreakableActor.
+	for (int32 IndexA = 0; IndexA < Fragments.Num(); ++IndexA)
+	{
+		for (const FBox3DFragmentNeighbor& Neighbor : Fragments[IndexA].Neighbors)
+		{
+			const int32 IndexB = Neighbor.FragmentIndex;
+			if (IndexB <= IndexA)
+			{
+				continue;
+			}
+			const b3BodyId BodyA = FragmentBodies[IndexA];
+			const b3BodyId BodyB = FragmentBodies.IsValidIndex(IndexB) ? FragmentBodies[IndexB] : b3BodyId{};
+			if (!b3Body_IsValid(BodyA) || !b3Body_IsValid(BodyB))
+			{
+				continue;
+			}
+
+			const FTransform WorldA(ActorTransform.GetRotation(),
+				ActorTransform.TransformPosition(Fragments[IndexA].Centroid));
+			const FTransform WorldB(ActorTransform.GetRotation(),
+				ActorTransform.TransformPosition(Fragments[IndexB].Centroid));
+			const FVector Midpoint = (WorldA.GetLocation() + WorldB.GetLocation()) * 0.5;
+
+			b3WeldJointDef Def = b3DefaultWeldJointDef();
+			Def.base.bodyIdA = BodyA;
+			Def.base.bodyIdB = BodyB;
+			Def.base.localFrameA = b3Transform{
+				Box3D::ToB3(WorldA.InverseTransformPosition(Midpoint)),
+				Box3D::ToB3(WorldA.GetRotation().Inverse()) };
+			Def.base.localFrameB = b3Transform{
+				Box3D::ToB3(WorldB.InverseTransformPosition(Midpoint)),
+				Box3D::ToB3(WorldB.GetRotation().Inverse()) };
+
+			const float BreakForce = MaterialToughness > 0.0f
+				? float(Neighbor.SharedFaceArea) * MaterialToughness
+				: 0.0f;
+			Welds.Add({ b3CreateWeldJoint(WorldId, &Def), IndexA, IndexB, BreakForce });
+		}
+	}
+	UE_LOG(LogBox3D, Log, TEXT("%s: %d fragment bodies, %d welds"), *GetNameSafe(this),
+		Fragments.Num(), Welds.Num());
+}
+
+void ABox3DFracturedActor::DestroyFragmentPhysics()
+{
+	for (const FWeld& Weld : Welds)
+	{
+		if (b3Joint_IsValid(Weld.Joint))
+		{
+			b3DestroyJoint(Weld.Joint, /*wakeAttached*/ false);
+		}
+	}
+	Welds.Empty();
+
+	for (const b3BodyId Body : FragmentBodies)
+	{
+		if (b3Body_IsValid(Body))
+		{
+			b3DestroyBody(Body);
+		}
+	}
+	FragmentBodies.Empty();
+}
+
+void ABox3DFracturedActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	DestroyFragmentPhysics();
+	Super::EndPlay(EndPlayReason);
+}
+
+void ABox3DFracturedActor::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	CheckWelds();
+	SyncFragments();
+}
+
+void ABox3DFracturedActor::CheckWelds()
+{
+	bool bAnyBroke = false;
+	for (int32 Index = Welds.Num() - 1; Index >= 0; --Index)
+	{
+		const FWeld& Weld = Welds[Index];
+		if (!b3Joint_IsValid(Weld.Joint))
+		{
+			Welds.RemoveAtSwap(Index);
+			continue;
+		}
+		if (Weld.BreakForce > 0.0f
+			&& Box3D::ToUEDir(b3Joint_GetConstraintForce(Weld.Joint)).Size() > Weld.BreakForce)
+		{
+			b3DestroyJoint(Weld.Joint, /*wakeAttached*/ true);
+			Welds.RemoveAtSwap(Index);
+			bAnyBroke = true;
+		}
+	}
+	if (bAnyBroke)
+	{
+		OnWeldBroken.Broadcast();
+	}
+}
+
+void ABox3DFracturedActor::GetLiveWeldPairs(TArray<FIntPoint>& OutPairs) const
+{
+	OutPairs.Reset(Welds.Num());
+	for (const FWeld& Weld : Welds)
+	{
+		OutPairs.Emplace(Weld.FragmentA, Weld.FragmentB);
+	}
+}
+
+void ABox3DFracturedActor::SyncFragments()
+{
+	if (SectionGeometry.IsEmpty() || Mesh == nullptr)
+	{
+		return;
+	}
+
+	const FTransform WorldToActor = GetActorTransform().Inverse();
+	TArray<FVector> Vertices;
+	TArray<FVector> Normals;
+	for (const FSectionGeometry& Section : SectionGeometry)
+	{
+		const b3BodyId Body = FragmentBodies.IsValidIndex(Section.FragmentIndex)
+			? FragmentBodies[Section.FragmentIndex]
+			: b3BodyId{};
+		// Asleep bodies have not moved since their last synced pose (and never
+		// need a first sync: the sections start at the spawn pose).
+		if (!b3Body_IsValid(Body) || !b3Body_IsAwake(Body))
+		{
+			continue;
+		}
+
+		const b3WorldTransform Transform = b3Body_GetTransform(Body);
+		const FTransform Delta =
+			FTransform(Box3D::ToUE(Transform.q), Box3D::ToUEPos(Transform.p)) * WorldToActor;
+
+		Vertices.Reset(Section.LocalVertices.Num());
+		Normals.Reset(Section.LocalNormals.Num());
+		for (int32 Index = 0; Index < Section.LocalVertices.Num(); ++Index)
+		{
+			Vertices.Add(Delta.TransformPosition(Section.LocalVertices[Index]));
+			Normals.Add(Delta.TransformVectorNoScale(Section.LocalNormals[Index]));
+		}
+		Mesh->UpdateMeshSection_LinearColor(Section.SectionIndex, Vertices, Normals,
+			TArray<FVector2D>(), TArray<FLinearColor>(), TArray<FProcMeshTangent>());
 	}
 }
 
@@ -343,6 +564,9 @@ namespace Box3D
 		}
 
 		Actor->CoreMaterial = Params.CoreMaterial;
+		Actor->MaterialToughness = Params.MaterialToughness;
+		Actor->FragmentDensity = Params.FragmentDensity;
+		Actor->bStartAsleep = Params.bStartAsleep;
 		Actor->InitializeFragments(MoveTemp(Fragments), Component->GetMaterial(0));
 
 		// Swap the source out: the fractured actor owns the visuals from here, and

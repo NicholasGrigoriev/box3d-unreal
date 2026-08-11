@@ -1,18 +1,22 @@
-// Tests for the fractured-actor rendering half of D2: proxy resolution
-// fallback order (authored convex -> simple collision -> render vertices),
-// fragment layout parity between Box3D::FractureMesh and the pure fracture
-// core, per-fragment section materials, and the source-component swap-out
-// seam (visibility, Chaos collision, static mirror body).
+// Tests for the D2 fractured actor: proxy resolution fallback order
+// (authored convex -> simple collision -> render vertices), fragment layout
+// parity between Box3D::FractureMesh and the pure fracture core, per-fragment
+// section materials, the source-component swap-out seam (visibility, Chaos
+// collision, static mirror body), and the physics half — hull bodies per
+// fragment, cell-adjacency welds with area-scaled break forces, rest-state
+// sleep, and overload-driven weld snapping with island separation.
 
 #include "Misc/AutomationTest.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "Box3DConversion.h"
 #include "Box3DFracturedActor.h"
 #include "Box3DStaticSceneMirror.h"
 #include "Materials/MaterialInterface.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "ProceduralMeshComponent.h"
+#include "Tests/Box3DTestEventCounter.h"
 #include "Tests/Box3DTestHelpers.h"
 
 namespace
@@ -32,6 +36,37 @@ namespace
 			return 0.0;
 		}
 		return Fragments[0].Volume;
+	}
+
+	/// Connected components over fragments, edges = surviving welds.
+	int32 CountWeldIslands(const ABox3DFracturedActor& Actor)
+	{
+		TArray<int32> Parent;
+		Parent.SetNum(Actor.GetFragmentCount());
+		for (int32 Index = 0; Index < Parent.Num(); ++Index)
+		{
+			Parent[Index] = Index;
+		}
+		const auto Find = [&Parent](int32 Node)
+		{
+			while (Parent[Node] != Node)
+			{
+				Node = Parent[Node] = Parent[Parent[Node]];
+			}
+			return Node;
+		};
+		TArray<FIntPoint> Pairs;
+		Actor.GetLiveWeldPairs(Pairs);
+		for (const FIntPoint& Pair : Pairs)
+		{
+			Parent[Find(Pair.X)] = Find(Pair.Y);
+		}
+		int32 Islands = 0;
+		for (int32 Index = 0; Index < Parent.Num(); ++Index)
+		{
+			Islands += Find(Index) == Index ? 1 : 0;
+		}
+		return Islands;
 	}
 }
 
@@ -222,6 +257,196 @@ bool FBox3DFracturedActorSwapOutTest::RunTest(const FString& Parameters)
 			Actor->GetMesh()->GetMaterial(Sections.Y) == Component->GetMaterial(0));
 	}
 
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DFracturedActorWeldAdjacencyTest,
+	"Box3DUnreal.FracturedActor.WeldsMatchAdjacency", BOX3D_TEST_FLAGS)
+bool FBox3DFracturedActorWeldAdjacencyTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld Test;
+
+	UStaticMeshComponent* Component = Box3DTest::SpawnSceneMesh(Test.World, Box3DTest::LoadCubeMesh(),
+		FTransform::Identity, EComponentMobility::Movable, ECollisionEnabled::QueryAndPhysics);
+
+	FBox3DFractureMeshParams Params;
+	Params.Fracture.Seed = 42;
+	Params.Fracture.CellCount = 12;
+	Params.bStartAsleep = true;
+	ABox3DFracturedActor* Actor = Box3D::FractureMesh(Component, Params);
+	if (!TestNotNull(TEXT("fractured actor spawned"), Actor))
+	{
+		return false;
+	}
+
+	const TArray<FBox3DFragmentData>& Fragments = Actor->GetFragments();
+	for (int32 Index = 0; Index < Fragments.Num(); ++Index)
+	{
+		TestTrue(FString::Printf(TEXT("fragment %d has a hull body"), Index),
+			b3Body_IsValid(Actor->GetFragmentBody(Index)));
+	}
+
+	// Welds are exactly the D1 adjacency pairs, one per pair.
+	TSet<FIntPoint> ExpectedPairs;
+	for (int32 Index = 0; Index < Fragments.Num(); ++Index)
+	{
+		for (const FBox3DFragmentNeighbor& Neighbor : Fragments[Index].Neighbors)
+		{
+			if (Neighbor.FragmentIndex > Index)
+			{
+				ExpectedPairs.Add(FIntPoint(Index, Neighbor.FragmentIndex));
+			}
+		}
+	}
+	TestTrue(TEXT("layout has adjacency"), ExpectedPairs.Num() > 0);
+	TestEqual(TEXT("one weld per adjacent pair"), Actor->GetLiveWeldCount(), ExpectedPairs.Num());
+
+	TArray<FIntPoint> LivePairs;
+	Actor->GetLiveWeldPairs(LivePairs);
+	for (const FIntPoint& Pair : LivePairs)
+	{
+		TestTrue(FString::Printf(TEXT("weld (%d, %d) matches an adjacency pair"), Pair.X, Pair.Y),
+			ExpectedPairs.Contains(Pair));
+	}
+
+	TestEqual(TEXT("welded assembly is a single island"), CountWeldIslands(*Actor), 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DFracturedActorRestingAssemblyTest,
+	"Box3DUnreal.FracturedActor.WeldedAssemblyAtRest", BOX3D_TEST_FLAGS)
+bool FBox3DFracturedActorRestingAssemblyTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld Test;
+	Box3DTest::SpawnGround(Test.World, 0.0f);
+
+	// Cube resting exactly on the ground (spans Z 0..100).
+	UStaticMeshComponent* Component = Box3DTest::SpawnSceneMesh(Test.World, Box3DTest::LoadCubeMesh(),
+		FTransform(FVector(0, 0, 50)), EComponentMobility::Movable, ECollisionEnabled::QueryAndPhysics);
+
+	FBox3DFractureMeshParams Params;
+	Params.Fracture.Seed = 42;
+	Params.Fracture.CellCount = 8;
+	Params.bStartAsleep = true;
+	ABox3DFracturedActor* Actor = Box3D::FractureMesh(Component, Params);
+	if (!TestNotNull(TEXT("fractured actor spawned"), Actor))
+	{
+		return false;
+	}
+	const int32 InitialWelds = Actor->GetLiveWeldCount();
+	TestTrue(TEXT("assembly is welded"), InitialWelds > 0);
+
+	TArray<FVector> InitialPositions;
+	for (int32 Index = 0; Index < Actor->GetFragmentCount(); ++Index)
+	{
+		InitialPositions.Add(Box3D::ToUEPos(b3Body_GetPosition(Actor->GetFragmentBody(Index))));
+	}
+
+	Test.Step(60);
+	Actor->CheckWelds();
+
+	for (int32 Index = 0; Index < Actor->GetFragmentCount(); ++Index)
+	{
+		const b3BodyId Body = Actor->GetFragmentBody(Index);
+		TestFalse(FString::Printf(TEXT("fragment %d asleep after 60 steps"), Index), b3Body_IsAwake(Body));
+		const FVector Position = Box3D::ToUEPos(b3Body_GetPosition(Body));
+		TestTrue(FString::Printf(TEXT("fragment %d has zero drift (moved %f cm)"), Index,
+					 FVector::Dist(Position, InitialPositions[Index])),
+			Position.Equals(InitialPositions[Index], 0.001));
+	}
+	TestEqual(TEXT("all welds survive rest"), Actor->GetLiveWeldCount(), InitialWelds);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DFracturedActorOverloadBreakTest,
+	"Box3DUnreal.FracturedActor.OverloadSnapsWelds", BOX3D_TEST_FLAGS)
+bool FBox3DFracturedActorOverloadBreakTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld Test;
+	Box3DTest::SpawnGround(Test.World, 0.0f);
+
+	UStaticMeshComponent* Component = Box3DTest::SpawnSceneMesh(Test.World, Box3DTest::LoadCubeMesh(),
+		FTransform(FVector(0, 0, 50)), EComponentMobility::Movable, ECollisionEnabled::QueryAndPhysics);
+
+	// Two fragments, one weld: "the loaded welds" is exactly the weld of the
+	// impacted fragment, and the break outcome is unambiguous.
+	FBox3DFractureMeshParams Params;
+	Params.Fracture.Seed = 42;
+	Params.Fracture.CellCount = 2;
+	ABox3DFracturedActor* Actor = Box3D::FractureMesh(Component, Params);
+	if (!TestNotNull(TEXT("fractured actor spawned"), Actor) || !TestEqual(TEXT("two fragments"),
+			Actor->GetFragmentCount(), 2) || !TestEqual(TEXT("one weld"), Actor->GetLiveWeldCount(), 1))
+	{
+		return false;
+	}
+
+	UBox3DTestEventCounter* Counter = NewObject<UBox3DTestEventCounter>();
+	Actor->OnWeldBroken.AddDynamic(Counter, &UBox3DTestEventCounter::HandleWeldBroke);
+
+	// The break threshold in newtons, from the same shared-face area the weld
+	// was built from. Loads are applied as sustained forces: the weld's reported
+	// constraint force is inv_h x the warm-start impulse accumulator, which
+	// decays within a step's substeps for an instantaneous velocity impulse —
+	// only loads sustained across substeps (contacts, gravity, applied forces)
+	// register, exactly the loads gameplay impacts produce.
+	const double SharedArea = Actor->GetFragments()[0].Neighbors[0].SharedFaceArea;
+	const float BreakForce = float(SharedArea) * Actor->MaterialToughness;
+	TestTrue(TEXT("break force is positive"), BreakForce > 0.0f);
+
+	const b3BodyId Body0 = Actor->GetFragmentBody(0);
+	const b3BodyId Body1 = Actor->GetFragmentBody(1);
+
+	Test.Step(30); // settle on the ground
+	Actor->CheckWelds();
+	TestEqual(TEXT("weld survives settling"), Actor->GetLiveWeldCount(), 1);
+
+	// Below-threshold load: the weld holds and no event fires. The joint sees
+	// at most the mass-split share of the applied force plus the gravity load.
+	for (int32 Step = 0; Step < 3; ++Step)
+	{
+		b3Body_ApplyForceToCenter(Body0, b3Vec3{ BreakForce * 0.1f, 0.0f, 0.0f }, /*wake*/ true);
+		Test.Step(1);
+		Actor->CheckWelds();
+	}
+	TestEqual(TEXT("small load leaves the weld intact"), Actor->GetLiveWeldCount(), 1);
+	TestEqual(TEXT("no break event for the small load"), Counter->WeldBrokeCount, 0);
+
+	// Overload: 40x the threshold dwarfs any mass split, so the loaded weld
+	// snaps within a few steps and the event fires once.
+	for (int32 Step = 0; Step < 5 && Actor->GetLiveWeldCount() > 0; ++Step)
+	{
+		b3Body_ApplyForceToCenter(Body0, b3Vec3{ 0.0f, 0.0f, BreakForce * 40.0f }, /*wake*/ true);
+		Test.Step(1);
+		Actor->CheckWelds();
+	}
+	TestEqual(TEXT("overload snaps the weld"), Actor->GetLiveWeldCount(), 0);
+	TestEqual(TEXT("OnWeldBroken fired once"), Counter->WeldBrokeCount, 1);
+	TestEqual(TEXT("assembly separates into two islands"), CountWeldIslands(*Actor), 2);
+
+	// Freed fragment moves away independently.
+	const double InitialDistance = FVector::Dist(
+		Box3D::ToUEPos(b3Body_GetPosition(Body0)), Box3D::ToUEPos(b3Body_GetPosition(Body1)));
+	b3Body_ApplyLinearImpulseToCenter(Body0, b3Vec3{ 500.0f, 0.0f, 0.0f }, /*wake*/ true);
+	Test.Step(30);
+	Actor->SyncFragments();
+	const double FinalDistance = FVector::Dist(
+		Box3D::ToUEPos(b3Body_GetPosition(Body0)), Box3D::ToUEPos(b3Body_GetPosition(Body1)));
+	TestTrue(FString::Printf(TEXT("freed fragment separates (%f -> %f cm)"), InitialDistance, FinalDistance),
+		FinalDistance > InitialDistance + 50.0);
+
+	// The PMC sections follow the bodies: fragment 0 flew away from its spawn
+	// pose, so its synced section vertices sit far from the original geometry.
+	const FIntPoint Sections = Actor->GetFragmentSections(0);
+	const int32 SectionIndex = Sections.Y != INDEX_NONE ? Sections.Y : Sections.X;
+	const FProcMeshSection* Section = Actor->GetMesh()->GetProcMeshSection(SectionIndex);
+	if (TestNotNull(TEXT("fragment 0 has a PMC section"), Section) && Section->ProcVertexBuffer.Num() > 0)
+	{
+		const FVector SectionVertex(Section->ProcVertexBuffer[0].Position);
+		const FVector BodyPosition = Actor->GetActorTransform().InverseTransformPosition(
+			Box3D::ToUEPos(b3Body_GetPosition(Body0)));
+		TestTrue(TEXT("synced section rides the fragment body"),
+			FVector::Dist(SectionVertex, BodyPosition) < 200.0);
+	}
 	return true;
 }
 

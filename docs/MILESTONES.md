@@ -234,6 +234,15 @@ on forced rollback, and carries a 1 m authoritative correction through replay.
       `MinFragmentVolume` merging, `FractureLayoutHash`,
       `box3d.FractureDebug`; 9 automation tests (76 total).
 
+- [x] **D2 — fractured actor: rendering + physics** ✅ 2026-08-11 —
+      `Box3D::FractureMesh` + `ABox3DFracturedActor`: proxy resolution
+      (authored convex → simple collision → render-vert fallback), two
+      flat-shaded PMC sections per fragment (source / `CoreMaterial`),
+      swap-out seam, per-fragment `b3CreateHull` bodies, cell-adjacency
+      welds with `BreakForce = SharedFaceArea × MaterialToughness`,
+      `OnWeldBroken`, body-driven section sync, `box3d.Fracture`;
+      6 automation tests (82 total).
+
 ---
 
 ## Non-goals (for now)

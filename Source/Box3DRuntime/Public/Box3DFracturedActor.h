@@ -3,11 +3,14 @@
 #include "CoreMinimal.h"
 #include "Box3DFracture.h"
 #include "GameFramework/Actor.h"
+#include "box3d/id.h"
 #include "Box3DFracturedActor.generated.h"
 
 class UMaterialInterface;
 class UProceduralMeshComponent;
 class UStaticMeshComponent;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FBox3DFracturedWeldBrokeSignature);
 
 /// Which source ResolveFractureProxy built the convex fracture proxy from, in
 /// preference order. Packaged builds must hit AuthoredConvex or SimpleCollision:
@@ -36,17 +39,29 @@ struct FBox3DFractureMeshParams
 	/// arbitrary cut geometry needs no UV authoring. Null falls back to the
 	/// source component's material.
 	UMaterialInterface* CoreMaterial = nullptr;
+
+	/// Weld strength per unit of shared-face area (N/cm^2): each weld's break
+	/// force is SharedFaceArea x MaterialToughness. <= 0 makes welds unbreakable.
+	float MaterialToughness = 50.0f;
+
+	/// Fragment density in kg/m^3.
+	float FragmentDensity = 400.0f;
+
+	/// Spawn the fragment bodies asleep (welded rubble at rest). Defaults off
+	/// because fracture usually follows an impact that should scatter the pieces.
+	bool bStartAsleep = false;
 };
 
-/// The rendering half of a fractured static mesh: one ProceduralMeshComponent
-/// carrying up to two sections per fragment — exterior faces (inherited from
-/// the proxy surface) with the source component's material, interior cut faces
-/// with CoreMaterial. Spawned by Box3D::FractureMesh, which also swaps out the
-/// source component (hidden, Chaos collision off, static mirror body removed).
+/// A fractured static mesh: one ProceduralMeshComponent carrying up to two
+/// sections per fragment — exterior faces (inherited from the proxy surface)
+/// with the source component's material, interior cut faces with CoreMaterial.
+/// Spawned by Box3D::FractureMesh, which also swaps out the source component
+/// (hidden, Chaos collision off, static mirror body removed).
 ///
-/// This actor is purely visual for now: fragment physics (b3CreateHull bodies,
-/// cell-adjacency welds, break events) arrive with the next D2 slice, driving
-/// the stored per-fragment sections.
+/// Each fragment gets a dynamic b3 hull body; adjacent fragments (cell
+/// adjacency from the fracture core, not bounds proximity) are welded with
+/// break force SharedFaceArea x MaterialToughness. Tick snaps overloaded welds
+/// (OnWeldBroken) and drives the PMC sections from the body transforms.
 UCLASS(BlueprintType, NotBlueprintable, ClassGroup = (Physics))
 class BOX3DRUNTIME_API ABox3DFracturedActor : public AActor
 {
@@ -58,6 +73,26 @@ public:
 	/// Material applied to interior (cut) faces. Set before InitializeFragments.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture")
 	TObjectPtr<UMaterialInterface> CoreMaterial;
+
+	/// Weld strength per unit of shared-face area (N/cm^2). Each weld snaps when
+	/// its constraint force exceeds SharedFaceArea x MaterialToughness; <= 0
+	/// makes welds unbreakable. Sleeping assemblies report zero joint force, so
+	/// something must wake the fragments before welds can snap. Set before
+	/// InitializeFragments.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture", meta = (ClampMin = "0"))
+	float MaterialToughness = 50.0f;
+
+	/// Fragment density in kg/m^3. Set before InitializeFragments.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture", meta = (ClampMin = "1"))
+	float FragmentDensity = 400.0f;
+
+	/// Spawn the fragment bodies asleep. Set before InitializeFragments.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture")
+	bool bStartAsleep = false;
+
+	/// One or more welds snapped this check.
+	UPROPERTY(BlueprintAssignable, Category = "Fracture")
+	FBox3DFracturedWeldBrokeSignature OnWeldBroken;
 
 	/// Build the mesh sections from fracture output. Fragment geometry is in
 	/// actor space (the source component's space with scale baked in, UE cm).
@@ -78,13 +113,41 @@ public:
 															: FIntPoint(INDEX_NONE, INDEX_NONE);
 	}
 
-	/// Fracture geometry this actor renders — the physics slice consumes this
-	/// (fragment vertices for hulls, Neighbors for welds).
+	/// Fracture geometry this actor renders and simulates (fragment vertices
+	/// feed the hulls, Neighbors the welds).
 	const TArray<Box3D::Fracture::FBox3DFragmentData>& GetFragments() const { return Fragments; }
 
 	UProceduralMeshComponent* GetMesh() const { return Mesh; }
 
+	UFUNCTION(BlueprintPure, Category = "Fracture")
+	int32 GetLiveWeldCount() const { return Welds.Num(); }
+
+	/// Surviving weld fragment pairs, X < Y. Island counting for tests and later
+	/// milestones.
+	void GetLiveWeldPairs(TArray<FIntPoint>& OutPairs) const;
+
+	/// The fragment's dynamic hull body (b3_nullBodyId when hull cooking failed
+	/// and the fragment stayed visual-only).
+	b3BodyId GetFragmentBody(int32 FragmentIndex) const
+	{
+		return FragmentBodies.IsValidIndex(FragmentIndex) ? FragmentBodies[FragmentIndex] : b3BodyId{};
+	}
+
+	/// Snap any weld whose constraint force exceeds its break force. Runs from
+	/// Tick; public so headless tests can pump it without ticking actors.
+	void CheckWelds();
+
+	/// Re-emit PMC sections from the fragment body transforms (awake bodies
+	/// only). Runs from Tick; public for headless tests.
+	void SyncFragments();
+
+	//~ AActor
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void Tick(float DeltaSeconds) override;
+
 private:
+	void BuildFragmentPhysics();
+	void DestroyFragmentPhysics();
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Fracture", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UProceduralMeshComponent> Mesh;
 
@@ -92,6 +155,31 @@ private:
 
 	/// Per-fragment (ExteriorSection, InteriorSection), INDEX_NONE = absent.
 	TArray<FIntPoint> FragmentSections;
+
+	/// Per-fragment dynamic hull body, parallel to Fragments.
+	TArray<b3BodyId> FragmentBodies;
+
+	struct FWeld
+	{
+		b3JointId Joint;
+		int32 FragmentA;
+		int32 FragmentB;
+		/// Newtons; <= 0 = unbreakable.
+		float BreakForce;
+	};
+	TArray<FWeld> Welds;
+
+	/// Body-local copy of one PMC section's geometry (vertices relative to the
+	/// fragment centroid, normals in the spawn frame) so SyncFragments can
+	/// re-emit it under the current body transform.
+	struct FSectionGeometry
+	{
+		int32 SectionIndex = INDEX_NONE;
+		int32 FragmentIndex = INDEX_NONE;
+		TArray<FVector> LocalVertices;
+		TArray<FVector> LocalNormals;
+	};
+	TArray<FSectionGeometry> SectionGeometry;
 };
 
 namespace Box3D

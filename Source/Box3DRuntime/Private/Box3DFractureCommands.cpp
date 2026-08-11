@@ -1,11 +1,16 @@
-// Console hook for eyeballing the fracture core:
+// Console hooks for eyeballing the fracture system:
 //   box3d.FractureDebug [CellCount=12] [Seed=42] [RadialBias=0.5] [MinVolume=0]
 // Fractures a 1 m cube resting on the surface under the crosshair (impact
 // point = the crosshair hit) and debug-draws the cell wireframes for 20 s,
 // one color per fragment.
+//   box3d.Fracture [CellCount=12] [Seed=42] [Toughness=50]
+// Fractures the static mesh under the crosshair for real via
+// Box3D::FractureMesh — welded rubble that scatters when welds snap.
 
 #include "Box3DFracture.h"
+#include "Box3DFracturedActor.h"
 #include "Box3DRuntime.h"
+#include "Components/StaticMeshComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
@@ -86,6 +91,51 @@ static FAutoConsoleCommandWithWorldAndArgs GBox3DFractureDebugCommand(
 			TEXT("box3d.FractureDebug: %d fragments (seed %d, bias %.2f, min volume %.0f), layout hash 0x%08X at %s"),
 			Fragments.Num(), Params.Seed, Params.RadialBias, Params.MinFragmentVolume,
 			FractureLayoutHash(Fragments), *Center.ToCompactString());
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GBox3DFractureCommand(
+	TEXT("box3d.Fracture"),
+	TEXT("Fracture the static mesh under the crosshair into welded physics fragments. Usage: box3d.Fracture [CellCount=12] [Seed=42] [Toughness=50]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		const APlayerController* PC = World != nullptr ? World->GetFirstPlayerController() : nullptr;
+		if (PC == nullptr)
+		{
+			return;
+		}
+		FVector ViewLocation;
+		FRotator ViewRotation;
+		PC->GetPlayerViewPoint(ViewLocation, ViewRotation);
+
+		FHitResult Hit;
+		const FVector TraceEnd = ViewLocation + ViewRotation.Vector() * 10000.0;
+		if (!World->LineTraceSingleByChannel(Hit, ViewLocation, TraceEnd, ECC_Visibility))
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("box3d.Fracture: nothing under the crosshair"));
+			return;
+		}
+		UStaticMeshComponent* Target = Cast<UStaticMeshComponent>(Hit.GetComponent());
+		if (Target == nullptr || Target->GetStaticMesh() == nullptr)
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("box3d.Fracture: hit %s, not a static mesh component"),
+				*GetNameSafe(Hit.GetComponent()));
+			return;
+		}
+
+		FBox3DFractureMeshParams Params;
+		Params.Fracture.CellCount = FMath::Clamp(Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 12, 1, 256);
+		Params.Fracture.Seed = Args.Num() > 1 ? FCString::Atoi(*Args[1]) : 42;
+		Params.MaterialToughness = Args.Num() > 2 ? FCString::Atof(*Args[2]) : 50.0f;
+		Params.Fracture.ImpactPoint = Hit.ImpactPoint;
+		Params.Fracture.ImpactRadius = FMath::Max(Target->Bounds.SphereRadius * 0.3, 10.0);
+		Params.Fracture.RadialBias = 0.5;
+
+		if (ABox3DFracturedActor* Actor = Box3D::FractureMesh(Target, Params))
+		{
+			UE_LOG(LogBox3D, Log, TEXT("box3d.Fracture: %s -> %d fragments, %d welds (seed %d, toughness %.1f)"),
+				*GetNameSafe(Target->GetStaticMesh()), Actor->GetFragmentCount(), Actor->GetLiveWeldCount(),
+				Params.Fracture.Seed, Params.MaterialToughness);
+		}
 	}));
 
 #endif // !UE_BUILD_SHIPPING
