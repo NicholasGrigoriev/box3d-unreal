@@ -242,6 +242,207 @@ namespace Box3D::Fracture
 			return Fragment;
 		}
 
+		/// Rebuild a fragment's vertex array to only the vertices its faces
+		/// reference, in face-iteration first-seen order (the same order
+		/// FinalizeFragment produces, so untouched fragments are unchanged).
+		/// Merging drops the shared faces of a pair, orphaning their vertices.
+		void CompactFragmentVertices(FBox3DFragmentData& Fragment)
+		{
+			TArray<int32> Remap;
+			Remap.Init(INDEX_NONE, Fragment.Vertices.Num());
+			TArray<FVector> Compacted;
+			Compacted.Reserve(Fragment.Vertices.Num());
+			for (FBox3DFragmentFace& Face : Fragment.Faces)
+			{
+				for (int32& Index : Face.VertexIndices)
+				{
+					if (Remap[Index] == INDEX_NONE)
+					{
+						Remap[Index] = Compacted.Add(Fragment.Vertices[Index]);
+					}
+					Index = Remap[Index];
+				}
+			}
+			Fragment.Vertices = MoveTemp(Compacted);
+		}
+
+		FBox3DFragmentNeighbor* FindNeighborLink(FBox3DFragmentData& Fragment, int32 NeighborIndex)
+		{
+			return Fragment.Neighbors.FindByPredicate([NeighborIndex](const FBox3DFragmentNeighbor& Link)
+			{
+				return Link.FragmentIndex == NeighborIndex;
+			});
+		}
+
+		/// Absorb fragment Small into fragment Target: union the surfaces (both
+		/// cells' faces minus the shared pair), add volumes exactly, volume-weight
+		/// the centroid, and redirect all adjacency from Small to Target with
+		/// shared-face areas summed on both sides (keeps the canonical-per-pair
+		/// symmetry invariant).
+		void MergeFragmentInto(TArray<FBox3DFragmentData>& Fragments, int32 Small, int32 Target)
+		{
+			FBox3DFragmentData& T = Fragments[Target];
+			FBox3DFragmentData& S = Fragments[Small];
+
+			const double TotalVolume = T.Volume + S.Volume;
+			T.Centroid = (T.Centroid * T.Volume + S.Centroid * S.Volume) / TotalVolume;
+			T.Volume = TotalVolume;
+
+			for (int32 Index = T.Faces.Num() - 1; Index >= 0; --Index)
+			{
+				if (T.Faces[Index].NeighborIndex == Small)
+				{
+					T.Faces.RemoveAt(Index);
+				}
+			}
+			const int32 VertexOffset = T.Vertices.Num();
+			T.Vertices.Append(S.Vertices);
+			for (FBox3DFragmentFace& Face : S.Faces)
+			{
+				if (Face.NeighborIndex == Target)
+				{
+					continue;
+				}
+				for (int32& Index : Face.VertexIndices)
+				{
+					Index += VertexOffset;
+				}
+				T.Faces.Add(MoveTemp(Face));
+			}
+
+			T.Neighbors.RemoveAll([Small](const FBox3DFragmentNeighbor& Link)
+			{
+				return Link.FragmentIndex == Small;
+			});
+			for (const FBox3DFragmentNeighbor& Link : S.Neighbors)
+			{
+				if (Link.FragmentIndex == Target)
+				{
+					continue;
+				}
+				FBox3DFragmentData& N = Fragments[Link.FragmentIndex];
+				for (FBox3DFragmentFace& Face : N.Faces)
+				{
+					if (Face.NeighborIndex == Small)
+					{
+						Face.NeighborIndex = Target;
+					}
+				}
+				FBox3DFragmentNeighbor* BackToSmall = FindNeighborLink(N, Small);
+				check(BackToSmall != nullptr); // adjacency was symmetric before merging
+				if (FBox3DFragmentNeighbor* BackToTarget = FindNeighborLink(N, Target))
+				{
+					BackToTarget->SharedFaceArea += BackToSmall->SharedFaceArea;
+					N.Neighbors.RemoveAll([Small](const FBox3DFragmentNeighbor& Candidate)
+					{
+						return Candidate.FragmentIndex == Small;
+					});
+				}
+				else
+				{
+					BackToSmall->FragmentIndex = Target;
+				}
+				N.Neighbors.Sort([](const FBox3DFragmentNeighbor& A, const FBox3DFragmentNeighbor& B)
+				{
+					return A.FragmentIndex < B.FragmentIndex;
+				});
+
+				if (FBox3DFragmentNeighbor* Forward = FindNeighborLink(T, Link.FragmentIndex))
+				{
+					Forward->SharedFaceArea += Link.SharedFaceArea;
+				}
+				else
+				{
+					T.Neighbors.Add({ Link.FragmentIndex, Link.SharedFaceArea });
+				}
+			}
+			T.Neighbors.Sort([](const FBox3DFragmentNeighbor& A, const FBox3DFragmentNeighbor& B)
+			{
+				return A.FragmentIndex < B.FragmentIndex;
+			});
+
+			S = FBox3DFragmentData();
+		}
+
+		/// Merge fragments below MinVolume into a neighbor until every fragment
+		/// with neighbors meets the threshold. Deterministic: fragments scanned in
+		/// ascending index order, target = neighbor with the largest shared-face
+		/// area (Neighbors is sorted ascending and the comparison is strict, so
+		/// ties pick the lower index). Dead slots are compacted at the end and all
+		/// indices remapped (monotonic remap keeps neighbor lists sorted).
+		void MergeSmallFragments(TArray<FBox3DFragmentData>& Fragments, double MinVolume)
+		{
+			TArray<bool> Dead;
+			Dead.Init(false, Fragments.Num());
+
+			bool bMergedAny = true;
+			while (bMergedAny)
+			{
+				bMergedAny = false;
+				for (int32 Small = 0; Small < Fragments.Num(); ++Small)
+				{
+					if (Dead[Small] || Fragments[Small].Volume >= MinVolume ||
+						Fragments[Small].Neighbors.IsEmpty())
+					{
+						continue;
+					}
+					int32 Target = INDEX_NONE;
+					double BestArea = -1.0;
+					for (const FBox3DFragmentNeighbor& Link : Fragments[Small].Neighbors)
+					{
+						if (Link.SharedFaceArea > BestArea)
+						{
+							BestArea = Link.SharedFaceArea;
+							Target = Link.FragmentIndex;
+						}
+					}
+					MergeFragmentInto(Fragments, Small, Target);
+					Dead[Small] = true;
+					bMergedAny = true;
+				}
+			}
+
+			TArray<int32> Remap;
+			Remap.Init(INDEX_NONE, Fragments.Num());
+			int32 AliveCount = 0;
+			for (int32 Index = 0; Index < Fragments.Num(); ++Index)
+			{
+				if (!Dead[Index])
+				{
+					Remap[Index] = AliveCount++;
+				}
+			}
+			if (AliveCount == Fragments.Num())
+			{
+				return;
+			}
+
+			TArray<FBox3DFragmentData> Compacted;
+			Compacted.Reserve(AliveCount);
+			for (int32 Index = 0; Index < Fragments.Num(); ++Index)
+			{
+				if (Dead[Index])
+				{
+					continue;
+				}
+				FBox3DFragmentData& Fragment = Fragments[Index];
+				for (FBox3DFragmentFace& Face : Fragment.Faces)
+				{
+					if (Face.NeighborIndex != INDEX_NONE)
+					{
+						Face.NeighborIndex = Remap[Face.NeighborIndex];
+					}
+				}
+				for (FBox3DFragmentNeighbor& Link : Fragment.Neighbors)
+				{
+					Link.FragmentIndex = Remap[Link.FragmentIndex];
+				}
+				CompactFragmentVertices(Fragment);
+				Compacted.Add(MoveTemp(Fragment));
+			}
+			Fragments = MoveTemp(Compacted);
+		}
+
 		/// Outward face plane from a proxy face via Newell's method.
 		bool MakeFacePlane(const TArray<FVector>& Verts, const TArray<int32>& Face, FVector& OutN, double& OutD)
 		{
@@ -263,14 +464,20 @@ namespace Box3D::Fracture
 			return true;
 		}
 
-		/// Uniform seeded sites inside the proxy, quantized to the grid and
-		/// deduplicated. Deterministic: FRandomStream sequence + fixed X,Y,Z draw
-		/// order. Impact-biased density lands in D1 slice 2.
+		/// Seeded sites inside the proxy, quantized to the grid and deduplicated.
+		/// Deterministic: FRandomStream sequence + fixed draw order per attempt.
+		/// With RadialBias > 0 that fraction of candidates is drawn uniformly from
+		/// the ImpactRadius ball around ImpactPoint (rejected like any candidate
+		/// when outside the proxy); the RadialBias == 0 path draws exactly as the
+		/// uniform-only generator did.
 		TArray<FVector> GenerateSites(const FFractureProxy& Proxy, const FFractureParams& Params,
 			const TArray<TPair<FVector, double>>& ProxyPlanes)
 		{
 			FBox Bounds(Proxy.Vertices.GetData(), Proxy.Vertices.Num());
 			FRandomStream Stream(Params.Seed);
+
+			const double Bias = FMath::Clamp(Params.RadialBias, 0.0, 1.0);
+			const double ImpactRadius = FMath::Max(Params.ImpactRadius, QuantizeStep);
 
 			TArray<FVector> Sites;
 			Sites.Reserve(Params.CellCount);
@@ -279,10 +486,20 @@ namespace Box3D::Fracture
 			const int32 MaxAttempts = Params.CellCount * 256;
 			for (int32 Attempt = 0; Attempt < MaxAttempts && Sites.Num() < Params.CellCount; ++Attempt)
 			{
-				const FVector Candidate(
-					Stream.FRandRange(float(Bounds.Min.X), float(Bounds.Max.X)),
-					Stream.FRandRange(float(Bounds.Min.Y), float(Bounds.Max.Y)),
-					Stream.FRandRange(float(Bounds.Min.Z), float(Bounds.Max.Z)));
+				FVector Candidate;
+				if (Bias > 0.0 && double(Stream.FRand()) < Bias)
+				{
+					// Uniform in the impact ball: cube-root radius distribution.
+					const double Radius = ImpactRadius * FMath::Pow(double(Stream.FRand()), 1.0 / 3.0);
+					Candidate = Params.ImpactPoint + FVector(Stream.GetUnitVector()) * Radius;
+				}
+				else
+				{
+					Candidate = FVector(
+						Stream.FRandRange(float(Bounds.Min.X), float(Bounds.Max.X)),
+						Stream.FRandRange(float(Bounds.Min.Y), float(Bounds.Max.Y)),
+						Stream.FRandRange(float(Bounds.Min.Z), float(Bounds.Max.Z)));
+				}
 
 				bool bInside = true;
 				for (const TPair<FVector, double>& Plane : ProxyPlanes)
@@ -508,6 +725,11 @@ namespace Box3D::Fracture
 					Fragment.Neighbors.RemoveAt(Slot);
 				}
 			}
+		}
+
+		if (Params.MinFragmentVolume > 0.0 && OutFragments.Num() > 1)
+		{
+			MergeSmallFragments(OutFragments, Params.MinFragmentVolume);
 		}
 
 		return !OutFragments.IsEmpty();

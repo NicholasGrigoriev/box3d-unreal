@@ -40,21 +40,26 @@ namespace Box3D::Fracture
 
 		/// Number of Voronoi sites to generate. The output fragment count matches
 		/// unless degenerate cells collapse (rare) or MinFragmentVolume merging
-		/// kicks in (D1 slice 2).
+		/// kicks in.
 		int32 CellCount = 8;
 
-		/// Impact location (cm) that site density will bias toward (D1 slice 2 —
-		/// currently unused, sites are uniform).
+		/// Impact location (cm) that site density biases toward when RadialBias > 0.
 		FVector ImpactPoint = FVector::ZeroVector;
 
-		/// Radius (cm) of the impact-biased site cluster (D1 slice 2).
+		/// Radius (cm) of the impact-biased site cluster. Clustered candidates are
+		/// drawn uniformly inside this ball and rejected if outside the proxy, so a
+		/// ball mostly outside the proxy yields fewer clustered sites.
 		double ImpactRadius = 50.0;
 
-		/// 0 = uniform site density, 1 = fully impact-clustered (D1 slice 2).
+		/// Fraction of sites drawn from the impact cluster: 0 = uniform site
+		/// density, 1 = fully impact-clustered. Clamped to [0, 1].
 		double RadialBias = 0.0;
 
-		/// Fragments below this volume (cm^3) get merged into a neighbor
-		/// (D1 slice 2 — currently unused).
+		/// Fragments below this volume (cm^3) merge into the neighbor with the
+		/// largest shared-face area (ties broken by lower fragment index), repeated
+		/// deterministically until every remaining fragment with neighbors meets
+		/// the threshold. Merged fragments are unions of convex cells (possibly
+		/// non-convex); volumes add exactly, adjacency stays symmetric.
 		double MinFragmentVolume = 0.0;
 	};
 

@@ -1,6 +1,7 @@
 // Tests for the deterministic fracture core (Box3DFracture): layout hashing,
-// seed sensitivity, volume conservation, hull validity, and adjacency symmetry.
-// Pure geometry — no world or subsystem needed.
+// seed sensitivity, volume conservation, hull validity, adjacency symmetry,
+// impact-biased site density, MinFragmentVolume merging, and worker-thread
+// independence. Pure geometry — no world or subsystem needed.
 
 #include "Misc/AutomationTest.h"
 
@@ -206,6 +207,192 @@ bool FBox3DFractureCellCountTest::RunTest(const FString& Parameters)
 	Bad.CellCount = 0;
 	TestFalse(TEXT("CellCount 0 rejected"), Fracture(Proxy, Bad, Fragments));
 	TestFalse(TEXT("empty proxy rejected"), Fracture(FFractureProxy(), DefaultParams(), Fragments));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DFractureImpactBiasTest,
+	"Box3DUnreal.Fracture.ImpactBias", BOX3D_TEST_FLAGS)
+bool FBox3DFractureImpactBiasTest::RunTest(const FString& Parameters)
+{
+	const FFractureProxy Proxy = DefaultProxy();
+
+	FFractureParams Uniform = DefaultParams();
+	Uniform.CellCount = 16;
+	Uniform.ImpactPoint = FVector::ZeroVector;
+	Uniform.ImpactRadius = 20.0;
+	Uniform.RadialBias = 0.0;
+	FFractureParams Biased = Uniform;
+	Biased.RadialBias = 1.0;
+
+	TArray<FBox3DFragmentData> UniformFragments;
+	TArray<FBox3DFragmentData> BiasedFragments;
+	TestTrue(TEXT("uniform fracture succeeds"), Fracture(Proxy, Uniform, UniformFragments));
+	TestTrue(TEXT("biased fracture succeeds"), Fracture(Proxy, Biased, BiasedFragments));
+	TestEqual(TEXT("biased fracture yields the requested cell count"),
+		BiasedFragments.Num(), Biased.CellCount);
+
+	// All biased sites sit within ImpactRadius of the impact, so cells near
+	// the impact are much smaller (denser sites -> tinier cells) and fragment
+	// centroids sit closer to the impact on average than the uniform layout.
+	auto MinVolume = [](const TArray<FBox3DFragmentData>& Fragments)
+	{
+		double Min = TNumericLimits<double>::Max();
+		for (const FBox3DFragmentData& Fragment : Fragments)
+		{
+			Min = FMath::Min(Min, Fragment.Volume);
+		}
+		return Min;
+	};
+	auto MeanDistance = [](const TArray<FBox3DFragmentData>& Fragments, const FVector& Point)
+	{
+		double Sum = 0.0;
+		for (const FBox3DFragmentData& Fragment : Fragments)
+		{
+			Sum += FVector::Dist(Fragment.Centroid, Point);
+		}
+		return Sum / Fragments.Num();
+	};
+	TestTrue(FString::Printf(TEXT("smallest fragment shrinks when biased (%.0f vs %.0f cm3)"),
+			MinVolume(BiasedFragments), MinVolume(UniformFragments)),
+		MinVolume(BiasedFragments) < 0.5 * MinVolume(UniformFragments));
+	TestTrue(FString::Printf(TEXT("mean centroid distance shrinks when biased (%.1f vs %.1f)"),
+			MeanDistance(BiasedFragments, Uniform.ImpactPoint),
+			MeanDistance(UniformFragments, Uniform.ImpactPoint)),
+		MeanDistance(BiasedFragments, Uniform.ImpactPoint) <
+			MeanDistance(UniformFragments, Uniform.ImpactPoint));
+
+	// Bias changes the layout, and the biased path is itself deterministic.
+	TestNotEqual(TEXT("bias changes the layout hash"),
+		FractureLayoutHash(BiasedFragments), FractureLayoutHash(UniformFragments));
+	TArray<FBox3DFragmentData> BiasedRepeat;
+	TestTrue(TEXT("biased repeat succeeds"), Fracture(Proxy, Biased, BiasedRepeat));
+	TestEqual(TEXT("biased fracture deterministic"),
+		FractureLayoutHash(BiasedRepeat), FractureLayoutHash(BiasedFragments));
+
+	// Biased volume is still conserved: the cluster's hull cells stretch to
+	// the proxy boundary, they don't leave gaps.
+	double TotalVolume = 0.0;
+	for (const FBox3DFragmentData& Fragment : BiasedFragments)
+	{
+		TotalVolume += Fragment.Volume;
+	}
+	TestTrue(TEXT("biased volume conserved within 0.5%"),
+		FMath::Abs(TotalVolume - 1000000.0) / 1000000.0 < 0.005);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DFractureMinVolumeMergeTest,
+	"Box3DUnreal.Fracture.MinVolumeMerge", BOX3D_TEST_FLAGS)
+bool FBox3DFractureMinVolumeMergeTest::RunTest(const FString& Parameters)
+{
+	const FFractureProxy Proxy = DefaultProxy();
+
+	// Threshold just above the average cell volume (1e6 / 12), so at least one
+	// fragment sits below it and merging must fire.
+	FFractureParams Params = DefaultParams();
+	Params.MinFragmentVolume = 1000000.0 / 12.0 + 1.0;
+
+	TArray<FBox3DFragmentData> Fragments;
+	TestTrue(TEXT("fracture with merging succeeds"), Fracture(Proxy, Params, Fragments));
+	TestTrue(FString::Printf(TEXT("merging reduced fragment count (%d < 12)"), Fragments.Num()),
+		Fragments.Num() < 12);
+	TestTrue(TEXT("at least one fragment survives"), Fragments.Num() >= 1);
+
+	double TotalVolume = 0.0;
+	for (int32 Index = 0; Index < Fragments.Num(); ++Index)
+	{
+		const FBox3DFragmentData& Fragment = Fragments[Index];
+		TotalVolume += Fragment.Volume;
+		TestTrue(FString::Printf(TEXT("fragment %d meets threshold or is isolated (%.0f cm3)"),
+				Index, Fragment.Volume),
+			Fragment.Volume >= Params.MinFragmentVolume || Fragment.Neighbors.IsEmpty());
+		TestTrue(FString::Printf(TEXT("fragment %d has >= 4 vertices"), Index),
+			Fragment.Vertices.Num() >= 4);
+
+		// Every vertex is face-referenced (merging compacts orphans) and every
+		// face index is in range.
+		TArray<bool> Referenced;
+		Referenced.Init(false, Fragment.Vertices.Num());
+		for (const FBox3DFragmentFace& Face : Fragment.Faces)
+		{
+			for (const int32 VertexIndex : Face.VertexIndices)
+			{
+				if (TestTrue(TEXT("face vertex index in range"),
+						Fragment.Vertices.IsValidIndex(VertexIndex)))
+				{
+					Referenced[VertexIndex] = true;
+				}
+			}
+			TestTrue(TEXT("face neighbor index valid or exterior"),
+				Face.NeighborIndex == INDEX_NONE ||
+					(Fragments.IsValidIndex(Face.NeighborIndex) && Face.NeighborIndex != Index));
+		}
+		TestFalse(FString::Printf(TEXT("fragment %d has no orphaned vertices"), Index),
+			Referenced.Contains(false));
+
+		// Adjacency stays symmetric with identical canonical areas after merging.
+		for (const FBox3DFragmentNeighbor& Neighbor : Fragment.Neighbors)
+		{
+			TestTrue(TEXT("neighbor index valid"),
+				Fragments.IsValidIndex(Neighbor.FragmentIndex) && Neighbor.FragmentIndex != Index);
+			const FBox3DFragmentNeighbor* Back = Fragments[Neighbor.FragmentIndex].Neighbors.FindByPredicate(
+				[Index](const FBox3DFragmentNeighbor& Candidate)
+				{
+					return Candidate.FragmentIndex == Index;
+				});
+			if (TestNotNull(TEXT("neighbor lists back after merging"), Back))
+			{
+				TestTrue(TEXT("merged shared-face areas identical both ways"),
+					Neighbor.SharedFaceArea == Back->SharedFaceArea);
+			}
+		}
+	}
+
+	// Merging adds volumes exactly — conservation is unaffected.
+	TestTrue(TEXT("merged volume conserved within 0.5%"),
+		FMath::Abs(TotalVolume - 1000000.0) / 1000000.0 < 0.005);
+
+	TArray<FBox3DFragmentData> Repeat;
+	TestTrue(TEXT("merge repeat succeeds"), Fracture(Proxy, Params, Repeat));
+	TestEqual(TEXT("merging deterministic"),
+		FractureLayoutHash(Repeat), FractureLayoutHash(Fragments));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DFractureThreadCountDeterminismTest,
+	"Box3DUnreal.Fracture.ThreadCountDeterminism", BOX3D_TEST_FLAGS)
+bool FBox3DFractureThreadCountDeterminismTest::RunTest(const FString& Parameters)
+{
+	// Fracture is single-threaded pure geometry by design — it never touches
+	// the scheduler — but the plan pins hash stability across worker-thread
+	// counts, so prove independence by running under different scheduler
+	// settings (the same override the threading tests use), with every fracture
+	// feature engaged.
+	const FFractureProxy Proxy = DefaultProxy();
+	FFractureParams Params = DefaultParams();
+	Params.ImpactPoint = FVector(25.0, 0.0, -10.0);
+	Params.ImpactRadius = 30.0;
+	Params.RadialBias = 0.75;
+	Params.MinFragmentVolume = 20000.0;
+
+	TOptional<uint32> ReferenceHash;
+	for (const int32 Workers : { 1, 2, 8 })
+	{
+		Box3DTest::FScopedTaskSettings Settings(Workers, EBox3DTaskSystem::UnrealTasks);
+		TArray<FBox3DFragmentData> Fragments;
+		TestTrue(FString::Printf(TEXT("fracture succeeds with %d workers"), Workers),
+			Fracture(Proxy, Params, Fragments));
+		const uint32 Hash = FractureLayoutHash(Fragments);
+		if (!ReferenceHash.IsSet())
+		{
+			ReferenceHash = Hash;
+		}
+		else
+		{
+			TestEqual(FString::Printf(TEXT("layout hash identical with %d workers"), Workers),
+				Hash, ReferenceHash.GetValue());
+		}
+	}
 	return true;
 }
 

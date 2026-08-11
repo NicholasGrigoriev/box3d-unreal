@@ -226,6 +226,16 @@ on forced rollback, and carries a 1 m authoritative correction through replay.
 
 ---
 
+## Destruction (docs/DESTRUCTION_PLAN.md, branch feature/destruction)
+
+- [x] **D1 — deterministic fracture core** ✅ 2026-08-11 — `Box3D::Fracture`:
+      seeded quantized Voronoi sites (impact-biased via `RadialBias`),
+      half-space clipper with canonical per-pair bisector planes,
+      `MinFragmentVolume` merging, `FractureLayoutHash`,
+      `box3d.FractureDebug`; 9 automation tests (76 total).
+
+---
+
 ## Non-goals (for now)
 
 - Replacing Chaos wholesale (UE collision channels, physics assets, ragdolls stay Chaos)
