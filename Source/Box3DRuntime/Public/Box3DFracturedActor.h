@@ -4,6 +4,7 @@
 #include "Box3DDestruction.h"
 #include "Box3DFracture.h"
 #include "Box3DStructure.h"
+#include "Box3DStress.h"
 #include "GameFramework/Actor.h"
 #include "box3d/id.h"
 #include "Box3DFracturedActor.generated.h"
@@ -14,6 +15,8 @@ class UProceduralMeshComponent;
 class UStaticMeshComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FBox3DFracturedWeldBrokeSignature);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FBox3DStructureStressedSignature,
+	int32, BondIndex, float, OverloadRatio, float, BondHealth);
 
 /// Which source ResolveFractureProxy built the convex fracture proxy from, in
 /// preference order. Packaged builds must hit AuthoredConvex or SimpleCollision:
@@ -73,6 +76,14 @@ struct FBox3DFractureMeshParams
 	/// under the per-tick budget and fall as welded clumps. Assemblies with no
 	/// anchors at build fall back to plain dynamic rubble (the default behavior).
 	bool bStructural = false;
+
+	/// Sustained-load capacities in pascals. Non-positive disables that mode.
+	float TensionStrengthPa = 1.0e6f;
+	float CompressionStrengthPa = 5.0e6f;
+	float ShearStrengthPa = 1.0e6f;
+
+	/// Health removed per second for each unit of overload above capacity.
+	float SustainedOverloadHealthPerSecond = 1.0f;
 };
 
 /// A fractured static mesh: one ProceduralMeshComponent carrying up to two
@@ -118,6 +129,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture")
 	bool bStructural = false;
 
+	/// Sustained structural tension capacity in pascals; <= 0 disables tension damage.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture|Stress", meta = (ClampMin = "0"))
+	float TensionStrengthPa = 1.0e6f;
+
+	/// Sustained structural compression capacity in pascals; <= 0 disables compression damage.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture|Stress", meta = (ClampMin = "0"))
+	float CompressionStrengthPa = 5.0e6f;
+
+	/// Sustained structural shear capacity in pascals; <= 0 disables shear damage.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture|Stress", meta = (ClampMin = "0"))
+	float ShearStrengthPa = 1.0e6f;
+
+	/// Health removed per second for each unit by which stress exceeds capacity.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture|Stress", meta = (ClampMin = "0"))
+	float SustainedOverloadHealthPerSecond = 1.0f;
+
 	/// Volume thresholds routing fragments into tiers. Set before
 	/// InitializeFragments; non-Body fragments get no sections, bodies, or welds.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture")
@@ -142,6 +169,11 @@ public:
 	/// One or more welds snapped this check.
 	UPROPERTY(BlueprintAssignable, Category = "Fracture")
 	FBox3DFracturedWeldBrokeSignature OnWeldBroken;
+
+	/// Fires for each overloaded bond before health erosion and possible failure,
+	/// providing a creak-audio / dust-VFX hook.
+	UPROPERTY(BlueprintAssignable, Category = "Fracture|Stress")
+	FBox3DStructureStressedSignature OnStructureStressed;
 
 	/// Build the mesh sections from fracture output. Fragment geometry is in
 	/// actor space (the source component's space with scale baked in, UE cm).
@@ -215,6 +247,20 @@ public:
 	/// one mid-pass. Runs from Tick; public for headless tests.
 	void ProcessPromotions();
 
+	/// Advance structural stress relaxation and sustained-overload erosion.
+	/// Runs from Tick; public so headless tests can pump exact fixed steps.
+	void ProcessStructuralStress(float DeltaSeconds);
+
+	/// Feed an event-driven impulse into the next stress solve. Inputs are world
+	/// space UE units (kg*cm/s and cm); invalid/non-structural fragments are ignored.
+	void QueueStressImpulse(int32 FragmentIndex, const FVector& WorldImpulse,
+		const FVector& WorldApplicationPoint);
+
+	/// Box3DExplode's structural event path. Builds deterministic per-fragment
+	/// impulses without polling physics-joint forces.
+	void QueueExplosionStress(const FVector& WorldCenter, float Radius, float Falloff,
+		float ImpulsePerArea);
+
 	/// Chunks waiting in the promotion queue.
 	UFUNCTION(BlueprintPure, Category = "Fracture")
 	int32 GetPendingPromotionCount() const { return PendingPromotions.Num(); }
@@ -226,6 +272,9 @@ public:
 
 	/// The assembly's bond graph. Empty unless structural mode is live.
 	const Box3D::Structure::FBox3DStructureGraph& GetStructureGraph() const { return StructureGraph; }
+
+	/// Deterministic digest of current bond health and last resolved loads.
+	uint32 GetStructureStressHash() const { return StressSolver.BondHealthHash(); }
 
 	/// Re-emit PMC sections from the fragment body transforms (awake bodies
 	/// only). Runs from Tick; public for headless tests.
@@ -247,6 +296,13 @@ private:
 
 	/// Queue island chunks for promotion, in island order (FIFO).
 	void EnqueueIslands(const Box3D::Structure::FBox3DStructureIslands& Islands);
+
+	/// Destroy the weld matching a graph bond, route its connectivity event, and
+	/// enqueue newly unsupported islands. Returns false for an already-dead bond.
+	bool BreakStructuralBond(int32 BondIndex);
+
+	/// Rebuild the pure-data stress solve graph after topology changes.
+	bool InitializeStressSolver();
 
 	/// Fire-and-forget DebrisSystem spawn carrying the burst arrays, world space.
 	void SpawnDebrisBurst() const;
@@ -284,6 +340,13 @@ private:
 
 	/// Fragment indices awaiting static->dynamic promotion, FIFO.
 	TArray<int32> PendingPromotions;
+
+	Box3D::Structure::FBox3DStressSolver StressSolver;
+	TArray<Box3D::Structure::FBox3DStressImpulse> PendingStressImpulses;
+	bool bStressTopologyDirty = false;
+	int32 AppliedStressCoarsenThreshold = INDEX_NONE;
+	bool bStressSolveSeeded = false;
+	bool bStressImpulseSolve = false;
 
 	/// Body-local copy of one PMC section's geometry (vertices relative to the
 	/// fragment centroid, normals in the spawn frame) so SyncFragments can

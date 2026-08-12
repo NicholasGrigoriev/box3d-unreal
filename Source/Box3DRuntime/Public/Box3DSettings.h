@@ -135,6 +135,16 @@ public:
 	UPROPERTY(EditAnywhere, config, Category = "Destruction", meta = (ClampMin = "0"))
 	int32 MaxPromotionsPerTick = 64;
 
+	/// Fixed-order stress-relaxation passes per structural actor tick (D5).
+	/// Higher values propagate loads farther through large structures each frame.
+	UPROPERTY(EditAnywhere, config, Category = "Destruction", meta = (ClampMin = "1", ClampMax = "256"))
+	int32 StressRelaxationIterationsPerTick = 8;
+
+	/// Structures above this live-node count are deterministically coarsened to
+	/// approximately this many solve nodes. 0 disables stress-graph coarsening.
+	UPROPERTY(EditAnywhere, config, Category = "Destruction", meta = (ClampMin = "0"))
+	int32 StressCoarsenNodeThreshold = 256;
+
 	/// Convert every placed static-mesh actor whose root simulates Chaos physics
 	/// into a Box3D prop (ABox3DPropActor) when a game world starts and when
 	/// levels stream in. "Simulate Physics" on a placed actor thereby becomes the

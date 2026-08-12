@@ -119,6 +119,30 @@ namespace Box3DTest
 		}
 	};
 
+	/// Temporarily override the D5 stress work budget and coarsening threshold.
+	/// Both are read live by structural actors.
+	struct FScopedStressSettings
+	{
+		int32 SavedIterations;
+		int32 SavedCoarsenThreshold;
+
+		FScopedStressSettings(int32 IterationsPerTick, int32 CoarsenNodeThreshold)
+		{
+			UBox3DSettings* Settings = GetMutableDefault<UBox3DSettings>();
+			SavedIterations = Settings->StressRelaxationIterationsPerTick;
+			SavedCoarsenThreshold = Settings->StressCoarsenNodeThreshold;
+			Settings->StressRelaxationIterationsPerTick = IterationsPerTick;
+			Settings->StressCoarsenNodeThreshold = CoarsenNodeThreshold;
+		}
+
+		~FScopedStressSettings()
+		{
+			UBox3DSettings* Settings = GetMutableDefault<UBox3DSettings>();
+			Settings->StressRelaxationIterationsPerTick = SavedIterations;
+			Settings->StressCoarsenNodeThreshold = SavedCoarsenThreshold;
+		}
+	};
+
 	/// Temporarily force interpolated body transforms on or off (read live each
 	/// Tick, so the scope only needs to cover the ticks under test). Tests that
 	/// assert exact post-step positions must force it OFF: the project config can

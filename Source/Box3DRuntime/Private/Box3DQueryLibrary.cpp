@@ -3,6 +3,7 @@
 #include "Box3DBodyComponent.h"
 #include "Box3DConversion.h"
 #include "Box3DDestructibleComponent.h"
+#include "Box3DFracturedActor.h"
 #include "Components/StaticMeshComponent.h"
 #include "Box3DRuntime.h"
 #include "Box3DWorldSubsystem.h"
@@ -268,6 +269,23 @@ void UBox3DQueryLibrary::Box3DExplode(UObject* WorldContextObject, FVector Cente
 	Def.impulsePerArea = ImpulsePerArea * Box3D::MetersToUE;
 	b3World_Explode(WorldId, &Def);
 
+	const UWorld* World =
+		GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
+	const UBox3DWorldSubsystem* Subsystem = World ? World->GetSubsystem<UBox3DWorldSubsystem>() : nullptr;
+	if (Subsystem != nullptr)
+	{
+		// Stress uses the explosion event itself; joint-force polling would miss
+		// instantaneous impulses and make the result solver-timing dependent.
+		const TArray<TWeakObjectPtr<ABox3DFracturedActor>> Structures = Subsystem->GetLiveFracturedActors();
+		for (const TWeakObjectPtr<ABox3DFracturedActor>& Weak : Structures)
+		{
+			if (ABox3DFracturedActor* Actor = Weak.Get())
+			{
+				Actor->QueueExplosionStress(Center, Radius, Falloff, ImpulsePerArea);
+			}
+		}
+	}
+
 	if (FractureEnergy <= 0.0f)
 	{
 		return;
@@ -275,9 +293,6 @@ void UBox3DQueryLibrary::Box3DExplode(UObject* WorldContextObject, FVector Cente
 
 	// Blast energy to destructibles, matching the impulse falloff shape. The
 	// registry is copied first: fracturing swaps meshes out and spawns actors.
-	const UWorld* World =
-		GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
-	const UBox3DWorldSubsystem* Subsystem = World ? World->GetSubsystem<UBox3DWorldSubsystem>() : nullptr;
 	if (Subsystem == nullptr)
 	{
 		return;

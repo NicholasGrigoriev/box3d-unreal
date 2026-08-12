@@ -39,6 +39,25 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Fracture", meta = (ClampMin = "1"))
 	float FragmentDensity = 400.0f;
 
+	/// Keep supported fragments static and enable D4 connectivity + D5 stress.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Structure")
+	bool bStructural = false;
+
+	/// Per-material sustained-load capacities in pascals. A non-positive value
+	/// disables damage for that load mode.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Structure", meta = (ClampMin = "0"))
+	float TensionStrengthPa = 1.0e6f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Structure", meta = (ClampMin = "0"))
+	float CompressionStrengthPa = 5.0e6f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Structure", meta = (ClampMin = "0"))
+	float ShearStrengthPa = 1.0e6f;
+
+	/// Health removed per second for each unit by which load exceeds capacity.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Structure", meta = (ClampMin = "0"))
+	float SustainedOverloadHealthPerSecond = 1.0f;
+
 	/// Material for interior (fracture-cut) faces; null falls back to the source
 	/// mesh's material.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Fracture")

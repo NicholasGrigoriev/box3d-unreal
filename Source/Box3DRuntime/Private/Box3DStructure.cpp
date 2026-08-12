@@ -142,6 +142,17 @@ namespace Box3D::Structure
 		FloodFrom(Seeds, OutIslands);
 	}
 
+	float FBox3DStructureGraph::ApplyBondDamage(int32 BondIndex, float Damage)
+	{
+		if (!Bonds.IsValidIndex(BondIndex) || Bonds[BondIndex].bBroken)
+		{
+			return 0.0f;
+		}
+		FBox3DStructureBond& Bond = Bonds[BondIndex];
+		Bond.Health = FMath::Clamp(Bond.Health - FMath::Max(Damage, 0.0f), 0.0f, 1.0f);
+		return Bond.Health;
+	}
+
 	void FBox3DStructureGraph::NotifyBondBroken(int32 BondIndex, FBox3DStructureIslands& OutIslands)
 	{
 		if (!Bonds.IsValidIndex(BondIndex) || Bonds[BondIndex].bBroken)

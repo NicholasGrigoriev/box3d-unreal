@@ -38,6 +38,11 @@ ABox3DFracturedActor* UBox3DDestructibleComponent::ApplyImpact(FVector WorldLoca
 	Params.CoreMaterial = CoreMaterial;
 	Params.MaterialToughness = MaterialToughness;
 	Params.FragmentDensity = FragmentDensity;
+	Params.bStructural = bStructural;
+	Params.TensionStrengthPa = TensionStrengthPa;
+	Params.CompressionStrengthPa = CompressionStrengthPa;
+	Params.ShearStrengthPa = ShearStrengthPa;
+	Params.SustainedOverloadHealthPerSecond = SustainedOverloadHealthPerSecond;
 	Params.Tiers = TierThresholds;
 	Params.DebrisSpeed = DebrisSpeed;
 	Params.DebrisSystem = DebrisSystem;

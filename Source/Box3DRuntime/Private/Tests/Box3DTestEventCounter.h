@@ -23,6 +23,10 @@ public:
 	int32 SensorEndCount = 0;
 	int32 JointBrokeCount = 0;
 	int32 WeldBrokeCount = 0;
+	int32 StructureStressedCount = 0;
+	int32 LastStressedBond = INDEX_NONE;
+	float LastOverloadRatio = 0.0f;
+	float LastBondHealth = 0.0f;
 
 	UPROPERTY()
 	TObjectPtr<UBox3DBodyComponent> LastContactOther;
@@ -77,5 +81,14 @@ public:
 	void HandleWeldBroke()
 	{
 		++WeldBrokeCount;
+	}
+
+	UFUNCTION()
+	void HandleStructureStressed(int32 BondIndex, float OverloadRatio, float BondHealth)
+	{
+		++StructureStressedCount;
+		LastStressedBond = BondIndex;
+		LastOverloadRatio = OverloadRatio;
+		LastBondHealth = BondHealth;
 	}
 };

@@ -29,6 +29,25 @@ namespace Box3D::Structure
 		double TorsionMoment = 0.0;
 	};
 
+	/// Material capacities at the UE-facing seam. Force components are converted
+	/// from kg*cm/s^2 over cm^2 to pascals before these thresholds are tested.
+	/// A non-positive threshold disables damage for that component.
+	struct FBox3DStressThresholds
+	{
+		double TensionPa = 1.0e6;
+		double CompressionPa = 5.0e6;
+		double ShearPa = 1.0e6;
+	};
+
+	struct FBox3DBondOverload
+	{
+		double TensionPa = 0.0;
+		double CompressionPa = 0.0;
+		double ShearPa = 0.0;
+		/// Maximum stress/threshold ratio. Damage begins strictly above 1.
+		double Ratio = 0.0;
+	};
+
 	struct FBox3DStressSolveStats
 	{
 		int32 Iterations = 0;
@@ -74,6 +93,11 @@ namespace Box3D::Structure
 		FBox3DStressSolveStats Relax(int32 IterationCount);
 
 		FBox3DBondStress GetBondStress(int32 BondIndex) const;
+
+		/// Resolve one bond's force components to Pa and compare them with the
+		/// material capacities. Bond area is the shared face in cm^2.
+		FBox3DBondOverload GetBondOverload(int32 BondIndex,
+			const FBox3DStressThresholds& Thresholds) const;
 
 		/// Quantized deterministic digest of fine-bond health and resolved loads.
 		/// Slice 2 can use the same digest once overload starts eroding health.

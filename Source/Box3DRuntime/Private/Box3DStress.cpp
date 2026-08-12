@@ -375,6 +375,42 @@ namespace Box3D::Structure
 		return Result;
 	}
 
+	FBox3DBondOverload FBox3DStressSolver::GetBondOverload(int32 BondIndex,
+		const FBox3DStressThresholds& Thresholds) const
+	{
+		FBox3DBondOverload Result;
+		if (Graph == nullptr || BondIndex < 0 || BondIndex >= Graph->GetBondCount())
+		{
+			return Result;
+		}
+		const FBox3DStructureBond& Bond = Graph->GetBond(BondIndex);
+		if (Bond.bBroken || Bond.Area <= UE_SMALL_NUMBER)
+		{
+			return Result;
+		}
+
+		// (kg*cm/s^2) / cm^2 -> N/m^2: force x0.01, area x0.0001.
+		constexpr double KgCmPerSecondSquaredPerSquareCmToPa = 100.0;
+		const FBox3DBondStress Stress = GetBondStress(BondIndex);
+		const double Scale = KgCmPerSecondSquaredPerSquareCmToPa / Bond.Area;
+		Result.TensionPa = Stress.Tension * Scale;
+		Result.CompressionPa = Stress.Compression * Scale;
+		Result.ShearPa = Stress.Shear * Scale;
+		if (Thresholds.TensionPa > 0.0)
+		{
+			Result.Ratio = FMath::Max(Result.Ratio, Result.TensionPa / Thresholds.TensionPa);
+		}
+		if (Thresholds.CompressionPa > 0.0)
+		{
+			Result.Ratio = FMath::Max(Result.Ratio, Result.CompressionPa / Thresholds.CompressionPa);
+		}
+		if (Thresholds.ShearPa > 0.0)
+		{
+			Result.Ratio = FMath::Max(Result.Ratio, Result.ShearPa / Thresholds.ShearPa);
+		}
+		return Result;
+	}
+
 	uint32 FBox3DStressSolver::BondHealthHash() const
 	{
 		uint32 Hash = B3_HASH_INIT;

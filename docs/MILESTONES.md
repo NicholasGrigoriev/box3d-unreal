@@ -270,6 +270,20 @@ on forced rollback, and carries a 1 m authoritative correction through replay.
       `box3d.SpawnStructure` + `box3d.DestroyChunk`;
       7 automation tests (95 total).
 
+- [x] **D5 — stress relaxation (creaks and chain collapses)** ✅ 2026-08-12 —
+      budgeted deterministic `FBox3DStressSolver` integrated into structural
+      actor ticks with live iteration/coarsening settings, fragment mass and
+      configured-world-gravity inputs, event-driven `Box3DExplode` impulses,
+      per-bond tension/compression/shear resolution and UE-unit→Pa conversion.
+      Per-material Pa capacities and sustained-overload erosion live on
+      `UBox3DDestructibleComponent`; `OnStructureStressed` fires before failure,
+      and zero-health bonds destroy their matching weld then flow through D4
+      connectivity, FIFO promotion, and `OnWeldBroken`. Graph coarsening retains
+      canonical ordering and area-weighted fine-bond loads.
+      6 stress automation tests (101 total): analytic cantilever, coarsening,
+      correct-first overload break with actor integration, explosion event intake,
+      600-step stable gravity/no-damage, and deterministic erosion/break hash progression.
+
 ---
 
 ## Non-goals (for now)

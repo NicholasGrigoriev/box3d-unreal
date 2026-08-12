@@ -95,6 +95,12 @@ namespace Box3D::Structure
 		/// an already-destroyed or invalid index.
 		void NotifyChunkDestroyed(int32 NodeIndex, FBox3DStructureIslands& OutIslands);
 
+		/// Remove a fraction of a live bond's health without changing topology.
+		/// Returns the clamped remaining health, or zero for an invalid/broken bond.
+		/// The caller must route zero health through NotifyBondBroken so connectivity
+		/// and its physical weld change together.
+		float ApplyBondDamage(int32 BondIndex, float Damage);
+
 		/// A bond snapped (weld break, D5 overload): mark it broken and flood
 		/// from both endpoints. No-op on an already-broken or invalid index.
 		void NotifyBondBroken(int32 BondIndex, FBox3DStructureIslands& OutIslands);

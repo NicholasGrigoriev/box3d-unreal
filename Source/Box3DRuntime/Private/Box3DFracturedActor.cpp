@@ -439,6 +439,12 @@ void ABox3DFracturedActor::InitializeStructure()
 {
 	bStructureActive = false;
 	StructureGraph.Reset();
+	StressSolver.Reset();
+	PendingStressImpulses.Reset();
+	bStressTopologyDirty = false;
+	AppliedStressCoarsenThreshold = INDEX_NONE;
+	bStressSolveSeeded = false;
+	bStressImpulseSolve = false;
 	PendingPromotions.Reset();
 	if (!bStructural)
 	{
@@ -489,6 +495,7 @@ void ABox3DFracturedActor::InitializeStructure()
 		}
 	}
 	EnqueueIslands(Islands);
+	InitializeStressSolver();
 
 	UE_LOG(LogBox3D, Log, TEXT("%s: structural assembly live — %d chunks, %d bonds, %d anchors"),
 		*GetNameSafe(this), StructureGraph.GetNodeCount(), StructureGraph.GetBondCount(), AnchorCount);
@@ -499,6 +506,192 @@ void ABox3DFracturedActor::EnqueueIslands(const Box3D::Structure::FBox3DStructur
 	for (const TArray<int32>& Island : Islands.Islands)
 	{
 		PendingPromotions.Append(Island);
+	}
+}
+
+bool ABox3DFracturedActor::InitializeStressSolver()
+{
+	if (!bStructureActive)
+	{
+		StressSolver.Reset();
+		return false;
+	}
+	TArray<double> Masses;
+	Masses.Reserve(StructureGraph.GetNodeCount());
+	for (int32 Index = 0; Index < StructureGraph.GetNodeCount(); ++Index)
+	{
+		const b3BodyId Body = GetFragmentBody(Index);
+		const double BodyMass = b3Body_IsValid(Body) ? b3Body_GetMass(Body) : 0.0;
+		if (BodyMass > UE_SMALL_NUMBER)
+		{
+			Masses.Add(BodyMass);
+		}
+		else
+		{
+			// Static bodies may expose zero solver mass. Recover authored physical
+			// mass from kg/m^3 * cm^3 / 1e6 at the UE seam.
+			Masses.Add(StructureGraph.GetNodeVolume(Index)
+				* FMath::Max(static_cast<double>(FragmentDensity), 0.0) * 1.0e-6);
+		}
+	}
+	const int32 CoarsenThreshold = GetDefault<UBox3DSettings>()->StressCoarsenNodeThreshold;
+	bStressTopologyDirty = false;
+	AppliedStressCoarsenThreshold = CoarsenThreshold;
+	bStressSolveSeeded = false;
+	return StressSolver.Initialize(StructureGraph, Masses, CoarsenThreshold);
+}
+
+bool ABox3DFracturedActor::BreakStructuralBond(int32 BondIndex)
+{
+	if (!bStructureActive || BondIndex < 0 || BondIndex >= StructureGraph.GetBondCount()
+		|| StructureGraph.GetBond(BondIndex).bBroken)
+	{
+		return false;
+	}
+	const Box3D::Structure::FBox3DStructureBond& Bond = StructureGraph.GetBond(BondIndex);
+	for (int32 WeldIndex = Welds.Num() - 1; WeldIndex >= 0; --WeldIndex)
+	{
+		const FWeld& Weld = Welds[WeldIndex];
+		if (Weld.FragmentA == Bond.NodeA && Weld.FragmentB == Bond.NodeB)
+		{
+			if (b3Joint_IsValid(Weld.Joint))
+			{
+				b3DestroyJoint(Weld.Joint, /*wakeAttached*/ true);
+			}
+			Welds.RemoveAtSwap(WeldIndex);
+			break;
+		}
+	}
+	Box3D::Structure::FBox3DStructureIslands Islands;
+	StructureGraph.NotifyBondBroken(BondIndex, Islands);
+	EnqueueIslands(Islands);
+	bStressTopologyDirty = true;
+	return true;
+}
+
+void ABox3DFracturedActor::QueueStressImpulse(int32 FragmentIndex, const FVector& WorldImpulse,
+	const FVector& WorldApplicationPoint)
+{
+	if (!bStructureActive || !Fragments.IsValidIndex(FragmentIndex)
+		|| StructureGraph.IsChunkDestroyed(FragmentIndex))
+	{
+		return;
+	}
+	const FTransform WorldToActor = GetActorTransform().Inverse();
+	Box3D::Structure::FBox3DStressImpulse& Event = PendingStressImpulses.AddDefaulted_GetRef();
+	Event.NodeIndex = FragmentIndex;
+	Event.Impulse = WorldToActor.TransformVector(WorldImpulse);
+	Event.ApplicationPoint = WorldToActor.TransformPosition(WorldApplicationPoint);
+}
+
+void ABox3DFracturedActor::QueueExplosionStress(const FVector& WorldCenter, float Radius, float Falloff,
+	float ImpulsePerArea)
+{
+	if (!bStructureActive || FMath::IsNearlyZero(ImpulsePerArea))
+	{
+		return;
+	}
+	const FTransform ActorToWorld = GetActorTransform();
+	for (int32 Index = 0; Index < Fragments.Num(); ++Index)
+	{
+		if (StructureGraph.IsChunkDestroyed(Index) || !b3Body_IsValid(GetFragmentBody(Index)))
+		{
+			continue;
+		}
+		const FVector Center = ActorToWorld.TransformPosition(Fragments[Index].Centroid);
+		const double Distance = FVector::Dist(WorldCenter, Center);
+		double Scale = 0.0;
+		if (Distance <= Radius)
+		{
+			Scale = 1.0;
+		}
+		else if (Falloff > 0.0f && Distance < double(Radius) + Falloff)
+		{
+			Scale = 1.0 - (Distance - Radius) / Falloff;
+		}
+		if (Scale <= 0.0)
+		{
+			continue;
+		}
+		const FVector Direction = (Center - WorldCenter).GetSafeNormal();
+		// Projected blast area is approximated deterministically from volume.
+		const double ProjectedArea = FMath::Pow(FMath::Max(Fragments[Index].Volume, 0.0), 2.0 / 3.0);
+		QueueStressImpulse(Index, Direction * (ImpulsePerArea * ProjectedArea * Scale), Center);
+	}
+}
+
+void ABox3DFracturedActor::ProcessStructuralStress(float DeltaSeconds)
+{
+	if (!bStructureActive || DeltaSeconds <= 0.0f)
+	{
+		return;
+	}
+	if ((bStressTopologyDirty
+			|| AppliedStressCoarsenThreshold != GetDefault<UBox3DSettings>()->StressCoarsenNodeThreshold)
+		&& !InitializeStressSolver())
+	{
+		return;
+	}
+	if (!StressSolver.IsInitialized())
+	{
+		return;
+	}
+
+	const UBox3DSettings* Settings = GetDefault<UBox3DSettings>();
+	if (!bStressSolveSeeded || !PendingStressImpulses.IsEmpty())
+	{
+		bStressImpulseSolve = !PendingStressImpulses.IsEmpty();
+		const FVector LocalGravity = GetActorTransform().InverseTransformVectorNoScale(Settings->Gravity);
+		StressSolver.BeginSolve(LocalGravity, PendingStressImpulses, DeltaSeconds);
+		PendingStressImpulses.Reset();
+		bStressSolveSeeded = true;
+	}
+	const Box3D::Structure::FBox3DStressSolveStats Stats =
+		StressSolver.Relax(FMath::Max(Settings->StressRelaxationIterationsPerTick, 1));
+	// A partially propagated load is not yet a sustained equilibrium. Impulse
+	// solves are one-shot once converged; gravity equilibrium remains live.
+	if (Stats.ResidualForce > 1.0e-4 || Stats.ResidualMoment > 1.0e-4)
+	{
+		return;
+	}
+
+	Box3D::Structure::FBox3DStressThresholds Thresholds;
+	Thresholds.TensionPa = TensionStrengthPa;
+	Thresholds.CompressionPa = CompressionStrengthPa;
+	Thresholds.ShearPa = ShearStrengthPa;
+	int32 BrokenBond = INDEX_NONE;
+	for (int32 BondIndex = 0; BondIndex < StructureGraph.GetBondCount(); ++BondIndex)
+	{
+		const Box3D::Structure::FBox3DStructureBond& Bond = StructureGraph.GetBond(BondIndex);
+		if (Bond.bBroken)
+		{
+			continue;
+		}
+		const Box3D::Structure::FBox3DBondOverload Overload =
+			StressSolver.GetBondOverload(BondIndex, Thresholds);
+		if (Overload.Ratio <= 1.0)
+		{
+			continue;
+		}
+		OnStructureStressed.Broadcast(BondIndex, static_cast<float>(Overload.Ratio), Bond.Health);
+		const float Damage = static_cast<float>((Overload.Ratio - 1.0)
+			* FMath::Max(static_cast<double>(SustainedOverloadHealthPerSecond), 0.0)
+			* DeltaSeconds);
+		if (StructureGraph.ApplyBondDamage(BondIndex, Damage) <= 0.0f)
+		{
+			BrokenBond = BondIndex;
+			break; // Deterministic chain collapse: one topology event per tick.
+		}
+	}
+	const bool bAnyBroke = BrokenBond != INDEX_NONE && BreakStructuralBond(BrokenBond);
+	if (bAnyBroke)
+	{
+		OnWeldBroken.Broadcast();
+	}
+	if (bStressImpulseSolve)
+	{
+		bStressSolveSeeded = false;
+		bStressImpulseSolve = false;
 	}
 }
 
@@ -584,6 +777,7 @@ void ABox3DFracturedActor::DestroyFragment(int32 FragmentIndex)
 		Box3D::Structure::FBox3DStructureIslands Islands;
 		StructureGraph.NotifyChunkDestroyed(FragmentIndex, Islands);
 		EnqueueIslands(Islands);
+		bStressTopologyDirty = true;
 	}
 }
 
@@ -609,6 +803,12 @@ void ABox3DFracturedActor::DestroyFragmentPhysics()
 
 	bStructureActive = false;
 	StructureGraph.Reset();
+	StressSolver.Reset();
+	PendingStressImpulses.Empty();
+	bStressTopologyDirty = false;
+	AppliedStressCoarsenThreshold = INDEX_NONE;
+	bStressSolveSeeded = false;
+	bStressImpulseSolve = false;
 	PendingPromotions.Empty();
 }
 
@@ -626,6 +826,7 @@ void ABox3DFracturedActor::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 	CheckWelds();
+	ProcessStructuralStress(DeltaSeconds);
 	ProcessPromotions();
 	SyncFragments();
 }
@@ -656,12 +857,18 @@ void ABox3DFracturedActor::CheckWelds()
 	}
 
 	// Weld breaks are the bond-break events of the structure graph: each snap
-	// floods the affected neighborhood and queues stranded islands.
+	// floods the affected neighborhood and queues stranded islands. The joint is
+	// already gone, so route topology through the same helper used by stress.
 	for (const FIntPoint& Pair : BrokenPairs)
 	{
-		Box3D::Structure::FBox3DStructureIslands Islands;
-		StructureGraph.NotifyBondBroken(StructureGraph.FindBond(Pair.X, Pair.Y), Islands);
-		EnqueueIslands(Islands);
+		const int32 BondIndex = StructureGraph.FindBond(Pair.X, Pair.Y);
+		if (BondIndex != INDEX_NONE && !StructureGraph.GetBond(BondIndex).bBroken)
+		{
+			Box3D::Structure::FBox3DStructureIslands Islands;
+			StructureGraph.NotifyBondBroken(BondIndex, Islands);
+			EnqueueIslands(Islands);
+			bStressTopologyDirty = true;
+		}
 	}
 
 	if (bAnyBroke)
@@ -815,6 +1022,10 @@ namespace Box3D
 		Actor->FragmentDensity = Params.FragmentDensity;
 		Actor->bStartAsleep = Params.bStartAsleep;
 		Actor->bStructural = Params.bStructural;
+		Actor->TensionStrengthPa = Params.TensionStrengthPa;
+		Actor->CompressionStrengthPa = Params.CompressionStrengthPa;
+		Actor->ShearStrengthPa = Params.ShearStrengthPa;
+		Actor->SustainedOverloadHealthPerSecond = Params.SustainedOverloadHealthPerSecond;
 		Actor->TierThresholds = Params.Tiers;
 		Actor->DebrisSpeed = Params.DebrisSpeed;
 		Actor->DebrisSystem = Params.DebrisSystem;
