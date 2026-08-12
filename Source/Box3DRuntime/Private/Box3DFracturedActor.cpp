@@ -1,6 +1,7 @@
 #include "Box3DFracturedActor.h"
 
 #include "Box3DConversion.h"
+#include "Box3DDeform.h"
 #include "Box3DCooking.h"
 #include "Box3DTypes.h"
 #include "Box3DRuntime.h"
@@ -884,6 +885,66 @@ void ABox3DFracturedActor::GetLiveWeldPairs(TArray<FIntPoint>& OutPairs) const
 	{
 		OutPairs.Emplace(Weld.FragmentA, Weld.FragmentB);
 	}
+}
+
+int32 ABox3DFracturedActor::ApplyVertexDent(FVector WorldImpactPoint,
+	FVector WorldImpactNormal, float RadiusCm, float MaxDepthCm, float FalloffExponent)
+{
+	if (SectionGeometry.IsEmpty() || Mesh == nullptr)
+	{
+		return 0;
+	}
+
+	const FTransform WorldToActor = GetActorTransform().Inverse();
+	const FVector ActorImpactPoint = WorldToActor.TransformPosition(WorldImpactPoint);
+	const FVector ActorImpactNormal = WorldToActor.TransformVectorNoScale(WorldImpactNormal).GetSafeNormal();
+	if (ActorImpactNormal.IsNearlyZero())
+	{
+		return 0;
+	}
+
+	TArray<FVector> Vertices;
+	TArray<FVector> Normals;
+	int32 DisplacedCount = 0;
+	for (FSectionGeometry& Section : SectionGeometry)
+	{
+		FTransform Delta(FQuat::Identity,
+			Fragments.IsValidIndex(Section.FragmentIndex)
+				? Fragments[Section.FragmentIndex].Centroid
+				: FVector::ZeroVector);
+		const b3BodyId Body = FragmentBodies.IsValidIndex(Section.FragmentIndex)
+			? FragmentBodies[Section.FragmentIndex]
+			: b3BodyId{};
+		if (b3Body_IsValid(Body))
+		{
+			const b3WorldTransform Transform = b3Body_GetTransform(Body);
+			Delta = FTransform(Box3D::ToUE(Transform.q), Box3D::ToUEPos(Transform.p)) * WorldToActor;
+		}
+
+		Box3D::Deform::FBox3DVertexDent Dent;
+		Dent.ImpactPoint = Delta.InverseTransformPosition(ActorImpactPoint);
+		Dent.ImpactNormal = Delta.InverseTransformVectorNoScale(ActorImpactNormal);
+		Dent.RadiusCm = RadiusCm;
+		Dent.MaxDepthCm = MaxDepthCm;
+		Dent.FalloffExponent = FalloffExponent;
+		const int32 SectionDisplaced = Box3D::Deform::ApplyVertexDent(Section.LocalVertices, Dent);
+		if (SectionDisplaced == 0)
+		{
+			continue;
+		}
+		DisplacedCount += SectionDisplaced;
+
+		Vertices.Reset(Section.LocalVertices.Num());
+		Normals.Reset(Section.LocalNormals.Num());
+		for (int32 VertexIndex = 0; VertexIndex < Section.LocalVertices.Num(); ++VertexIndex)
+		{
+			Vertices.Add(Delta.TransformPosition(Section.LocalVertices[VertexIndex]));
+			Normals.Add(Delta.TransformVectorNoScale(Section.LocalNormals[VertexIndex]));
+		}
+		Mesh->UpdateMeshSection_LinearColor(Section.SectionIndex, Vertices, Normals,
+			TArray<FVector2D>(), TArray<FLinearColor>(), TArray<FProcMeshTangent>());
+	}
+	return DisplacedCount;
 }
 
 void ABox3DFracturedActor::SyncFragments()

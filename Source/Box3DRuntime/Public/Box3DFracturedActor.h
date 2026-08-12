@@ -276,6 +276,16 @@ public:
 	/// Deterministic digest of current bond health and last resolved loads.
 	uint32 GetStructureStressHash() const { return StressSolver.BondHealthHash(); }
 
+	/// Stamp a deterministic cosmetic dent into every fragment PMC section in
+	/// range. ImpactNormal points out of the struck surface; vertices move inward
+	/// by the radial falloff, capped at MaxDepthCm for this stamp. The render
+	/// geometry changes immediately; fragment hull collision is deliberately
+	/// untouched. Returns the number of displaced section vertices.
+	UFUNCTION(BlueprintCallable, Category = "Fracture|Deformation",
+		meta = (AdvancedDisplay = "FalloffExponent"))
+	int32 ApplyVertexDent(FVector WorldImpactPoint, FVector WorldImpactNormal,
+		float RadiusCm, float MaxDepthCm, float FalloffExponent = 2.0f);
+
 	/// Re-emit PMC sections from the fragment body transforms (awake bodies
 	/// only). Runs from Tick; public for headless tests.
 	void SyncFragments();
