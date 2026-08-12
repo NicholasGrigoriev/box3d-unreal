@@ -6,8 +6,12 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Box3DDeform.h"
+#include "Box3DDentMapComponent.h"
 #include "Box3DFracture.h"
 #include "Box3DFracturedActor.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "HAL/IConsoleManager.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "ProceduralMeshComponent.h"
 #include "Tests/Box3DTestHelpers.h"
 
@@ -77,6 +81,73 @@ bool FBox3DVertexDentDepthClampTest::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("vertex %d respects per-stamp depth clamp"), Index),
 			FVector::Dist(Dented[Index], Original[Index]) <= Dent.MaxDepthCm + 1.0e-6);
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DDentMapPingPongTest,
+	"Box3DUnreal.Deform.DentMapPingPong", BOX3D_TEST_FLAGS)
+bool FBox3DDentMapPingPongTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld Test;
+	UStaticMeshComponent* Mesh = Box3DTest::SpawnSceneMesh(Test.World,
+		Box3DTest::LoadCubeMesh(), FTransform::Identity,
+		EComponentMobility::Movable, ECollisionEnabled::QueryAndPhysics);
+	const ECollisionEnabled::Type CollisionBefore = Mesh->GetCollisionEnabled();
+	const UBodySetup* BodySetupBefore = Mesh->GetStaticMesh()->GetBodySetup();
+
+	UBox3DDentMapComponent* DentMap = NewObject<UBox3DDentMapComponent>(Mesh->GetOwner());
+	DentMap->DentMapResolution = 64;
+	DentMap->RegisterComponent();
+	if (!TestTrue(TEXT("dent map initializes on a registered mesh"), DentMap->InitializeDentMap(Mesh)))
+	{
+		return false;
+	}
+
+	UTextureRenderTarget2D* Initial = DentMap->GetDentMap();
+	UTextureRenderTarget2D* Other = DentMap->GetInactiveDentMap();
+	TestNotNull(TEXT("active render target allocated"), Initial);
+	TestNotNull(TEXT("inactive render target allocated"), Other);
+	TestNotEqual(TEXT("ping-pong targets are distinct"), Initial, Other);
+	TestEqual(TEXT("configured resolution is preserved"), Initial->SizeX, 64);
+	TestEqual(TEXT("map uses single-channel cosmetic format"),
+		Initial->RenderTargetFormat.GetValue(), RTF_R8);
+
+	TestTrue(TEXT("first valid stamp succeeds"), DentMap->StampDentUV(FVector2D(0.5), 0.2f, 0.4f));
+	TestEqual(TEXT("first stamp swaps to the other target"), DentMap->GetDentMap(), Other);
+	TestEqual(TEXT("first stamp increments count"), DentMap->GetDentStampCount(), 1);
+	TestTrue(TEXT("second valid stamp succeeds"), DentMap->StampDentUV(FVector2D(0.25, 0.75), 0.1f, 1.0f));
+	TestEqual(TEXT("second stamp swaps back"), DentMap->GetDentMap(), Initial);
+	TestEqual(TEXT("second stamp increments count"), DentMap->GetDentStampCount(), 2);
+
+	TestFalse(TEXT("invalid radius is rejected"), DentMap->StampDentUV(FVector2D(0.5), 0.0f, 1.0f));
+	TestEqual(TEXT("invalid stamp does not swap"), DentMap->GetDentMap(), Initial);
+	TestEqual(TEXT("invalid stamp does not increment count"), DentMap->GetDentStampCount(), 2);
+
+	TestEqual(TEXT("material contract texture parameter name"),
+		UBox3DDentMapComponent::DentMapParameterName, FName(TEXT("Box3D_DentMap")));
+	TestEqual(TEXT("material contract normal strength parameter name"),
+		UBox3DDentMapComponent::DentNormalStrengthParameterName, FName(TEXT("Box3D_DentNormalStrength")));
+	TestEqual(TEXT("material contract texel-size parameter name"),
+		UBox3DDentMapComponent::DentMapTexelSizeParameterName, FName(TEXT("Box3D_DentMapTexelSize")));
+	TestTrue(TEXT("mesh materials are wrapped in dynamic instances"),
+		!DentMap->GetMaterialInstances().IsEmpty());
+	for (UMaterialInstanceDynamic* Instance : DentMap->GetMaterialInstances())
+	{
+		TestTrue(TEXT("active dent map is published to each shared material instance"),
+			Instance->K2_GetTextureParameterValue(UBox3DDentMapComponent::DentMapParameterName)
+				== DentMap->GetDentMap());
+	}
+
+	DentMap->ClearDentMap();
+	TestEqual(TEXT("clear restores deterministic active side"), DentMap->GetDentMap(), Initial);
+	TestEqual(TEXT("clear resets stamp count"), DentMap->GetDentStampCount(), 0);
+	TestEqual(TEXT("dent map leaves collision mode unchanged"), Mesh->GetCollisionEnabled(), CollisionBefore);
+	TestTrue(TEXT("dent map leaves collision source unchanged"),
+		Mesh->GetStaticMesh()->GetBodySetup() == BodySetupBefore);
+#if !UE_BUILD_SHIPPING
+	TestNotNull(TEXT("visual dent test command is registered"),
+		IConsoleManager::Get().FindConsoleObject(TEXT("box3d.DentTest")));
+#endif
 	return true;
 }
 
