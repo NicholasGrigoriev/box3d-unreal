@@ -1,5 +1,8 @@
 #include "Box3DDestruction.h"
 
+#include "Box3DStress.h"
+#include "Box3DStructure.h"
+
 namespace Box3D::Destruction
 {
 	float ImpactEnergyJoules(float MassKg, float ApproachSpeedCmS)
@@ -69,5 +72,36 @@ namespace Box3D::Destruction
 				* DebrisSpeedCmS);
 			OutBurst.Sizes.Add(float(FMath::Pow(FMath::Max(Fragment.Volume, 0.0), 1.0 / 3.0)));
 		}
+	}
+
+	Fracture::FFractureParams MakeFractureParams(
+		const FBox3DDestructionEvent& Event, const FTransform& ComponentToWorld)
+	{
+		Fracture::FFractureParams Params;
+		Params.Seed = Event.Seed;
+		Params.CellCount = Event.Params.CellCount;
+		Params.ImpactPoint = ComponentToWorld.InverseTransformPosition(Event.Impact);
+		Params.ImpactRadius = Event.Params.ImpactRadius;
+		Params.RadialBias = Event.Params.RadialBias;
+		Params.MinFragmentVolume = Event.Params.MinFragmentVolume;
+		return Params;
+	}
+
+	bool GenerateEventFragments(const Fracture::FFractureProxy& Proxy,
+		const FTransform& ComponentToWorld, const FBox3DDestructionEvent& Event,
+		TArray<Fracture::FBox3DFragmentData>& OutFragments)
+	{
+		return Fracture::Fracture(Proxy, MakeFractureParams(Event, ComponentToWorld), OutFragments);
+	}
+
+	uint32 InitialBondHealthHash(
+		const TArray<Fracture::FBox3DFragmentData>& Fragments, float FragmentDensity)
+	{
+		Structure::FBox3DStructureGraph Graph;
+		Graph.Build(Fragments);
+
+		Structure::FBox3DStressSolver Solver;
+		Solver.Initialize(Graph, FMath::Max(static_cast<double>(FragmentDensity), 1.0) * 1.0e-6);
+		return Solver.BondHealthHash();
 	}
 }

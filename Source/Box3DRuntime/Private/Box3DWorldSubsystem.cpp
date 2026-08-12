@@ -158,6 +158,11 @@ void UBox3DWorldSubsystem::Deinitialize()
 	Super::Deinitialize();
 }
 
+bool UBox3DWorldSubsystem::IsSimulationAuthority() const
+{
+	return bSimulationAuthority && b3World_IsValid(WorldId);
+}
+
 bool UBox3DWorldSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
 	return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
@@ -394,7 +399,7 @@ void UBox3DWorldSubsystem::UnregisterDestructible(UBox3DDestructibleComponent* C
 void UBox3DWorldSubsystem::QueueDestructibleImpact(UBox3DDestructibleComponent* Destructible,
 	const FVector& WorldLocation, float EnergyJoules)
 {
-	if (Destructible == nullptr || Destructible->IsFractured())
+	if (!IsSimulationAuthority() || Destructible == nullptr || Destructible->IsFractured())
 	{
 		return;
 	}

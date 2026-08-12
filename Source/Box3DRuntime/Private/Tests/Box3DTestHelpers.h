@@ -171,7 +171,7 @@ namespace Box3DTest
 	{
 		UWorld* World = nullptr;
 
-		FTestWorld()
+		explicit FTestWorld(FName WorldName = TEXT("Box3DTestWorld"))
 		{
 			// This synthetic world skips actor EndPlay on teardown by design;
 			// keep the resulting CleanupWorld warning out of test reports.
@@ -181,7 +181,7 @@ namespace Box3DTest
 					EAutomationExpectedMessageFlags::Contains, /*Occurrences*/ -1, /*bIsRegex*/ false);
 			}
 
-			World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("Box3DTestWorld"));
+			World = UWorld::CreateWorld(EWorldType::Game, false, WorldName);
 			FWorldContext& Context = GEngine->CreateNewWorldContext(EWorldType::Game);
 			Context.SetCurrentWorld(World);
 

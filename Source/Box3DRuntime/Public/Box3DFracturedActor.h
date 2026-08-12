@@ -178,9 +178,11 @@ public:
 	/// Build the mesh sections from fracture output. Fragment geometry is in
 	/// actor space (the source component's space with scale baked in, UE cm).
 	/// Exterior sections get SourceMaterial, interior sections CoreMaterial
-	/// (falling back to SourceMaterial when unset).
+	/// (falling back to SourceMaterial when unset). Visual-only initialization is
+	/// the replicated-client path: it deliberately creates no b3 bodies, welds,
+	/// structural state, or fragment-pool entry.
 	void InitializeFragments(TArray<Box3D::Fracture::FBox3DFragmentData>&& InFragments,
-		UMaterialInterface* SourceMaterial);
+		UMaterialInterface* SourceMaterial, bool bCreatePhysics = true);
 
 	UFUNCTION(BlueprintPure, Category = "Fracture")
 	int32 GetFragmentCount() const { return Fragments.Num(); }
@@ -381,11 +383,19 @@ namespace Box3D
 	BOX3DRUNTIME_API EBox3DFractureProxySource ResolveFractureProxy(
 		const UStaticMeshComponent& Component, Fracture::FFractureProxy& OutProxy);
 
-	/// Fracture a static mesh component in place: resolve its proxy, run the
-	/// deterministic fracture core, spawn an ABox3DFracturedActor at the
-	/// component's transform, then swap the source out (hide it, disable its
-	/// Chaos collision, remove its static-mirror body if mirrored). Returns null
-	/// when no proxy resolves or fracture produces no fragments.
+	/// Stable source-geometry id used by FBox3DDestructionEvent. It is the static
+	/// mesh asset path, not an actor id; game replication still resolves which
+	/// actor/component receives the event.
+	BOX3DRUNTIME_API FName GetDestructionMeshId(const UStaticMeshComponent& Component);
+
+	/// Fracture a static mesh component in place. This is a local destruction
+	/// decision and therefore refuses to run without simulation authority.
 	BOX3DRUNTIME_API ABox3DFracturedActor* FractureMesh(UStaticMeshComponent* Component,
 		const FBox3DFractureMeshParams& Params);
+
+	/// Deterministically regenerate only the render fragment set from a received
+	/// authority event. This is the pure-client path and never creates b3 state,
+	/// even if called in a world that happens to have a Box3D world.
+	BOX3DRUNTIME_API ABox3DFracturedActor* RegenerateFractureVisuals(
+		UStaticMeshComponent* Component, const FBox3DFractureMeshParams& Params);
 }

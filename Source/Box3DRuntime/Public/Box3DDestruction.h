@@ -69,6 +69,108 @@ struct FBox3DEnergyToCellCurve
 	int32 MaxCellCount = 48;
 };
 
+/// Replicated numeric policy accompanying one destruction decision. Presentation
+/// assets stay on the local destructible component; every value that can change
+/// fragment geometry, tiering, bodies, or structural state travels in the event.
+USTRUCT(BlueprintType)
+struct FBox3DDestructionEventParams
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction", meta = (ClampMin = "1"))
+	int32 CellCount = 8;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction", meta = (ClampMin = "0"))
+	double ImpactRadius = 50.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction", meta = (ClampMin = "0", ClampMax = "1"))
+	double RadialBias = 0.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction", meta = (ClampMin = "0"))
+	double MinFragmentVolume = 0.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction", meta = (ClampMin = "0"))
+	float MaterialToughness = 50.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction", meta = (ClampMin = "1"))
+	float FragmentDensity = 400.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction")
+	bool bStartAsleep = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction")
+	FBox3DTierThresholds Tiers;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction", meta = (ClampMin = "0"))
+	float DebrisSpeed = 300.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction")
+	bool bStructural = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction", meta = (ClampMin = "0"))
+	float TensionStrengthPa = 1.0e6f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction", meta = (ClampMin = "0"))
+	float CompressionStrengthPa = 5.0e6f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction", meta = (ClampMin = "0"))
+	float ShearStrengthPa = 1.0e6f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction", meta = (ClampMin = "0"))
+	float SustainedOverloadHealthPerSecond = 1.0f;
+};
+
+/// Game-side RPC/GAS payload. MeshId is the stable source-mesh asset path; game
+/// code still chooses the target actor/component through its own replicated id.
+/// Impact is world-space UE centimetres. The authority sends the event plus the
+/// layout hash returned by applying it; receivers validate before accepting
+/// predicted fragment state.
+USTRUCT(BlueprintType)
+struct FBox3DDestructionEvent
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction")
+	FName MeshId = NAME_None;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction")
+	FVector Impact = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction")
+	int32 Seed = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Destruction")
+	FBox3DDestructionEventParams Params;
+};
+
+/// Result of applying a destruction event locally. Hashes use int64 only because
+/// Blueprint has no uint32 pin; values are always in the uint32 range.
+USTRUCT(BlueprintType)
+struct FBox3DDestructionEventResult
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D|Destruction")
+	bool bApplied = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D|Destruction")
+	bool bVisualOnly = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D|Destruction")
+	bool bLayoutHashValidated = false;
+
+	/// True when game code must request the authority's fragment/body correction.
+	/// Predicted fragment bodies can use Box3D::ReconcileAndReplay for that state.
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D|Destruction")
+	bool bNeedsServerCorrection = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D|Destruction")
+	int64 FractureLayoutHash = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Box3D|Destruction")
+	int64 BondHealthHash = 0;
+};
+
 /// Per-fragment burst arrays for the Debris tier, in the fractured actor's
 /// space (actor transform maps them to world). The Niagara hookup consuming
 /// these is a later D3 slice; until then they are inspectable data.
@@ -110,4 +212,21 @@ namespace Box3D::Destruction
 	BOX3DRUNTIME_API void BuildDebrisBurst(const TArray<Fracture::FBox3DFragmentData>& Fragments,
 		const TArray<EBox3DFragmentTier>& Tiers, const FVector& ImpactPoint, float DebrisSpeedCmS,
 		FBox3DDebrisBurst& OutBurst);
+
+	/// Convert the replicated tuple into pure fracture inputs. ComponentToWorld
+	/// must contain rotation + translation only: proxy scale is already baked.
+	BOX3DRUNTIME_API Fracture::FFractureParams MakeFractureParams(
+		const FBox3DDestructionEvent& Event, const FTransform& ComponentToWorld);
+
+	/// Pure deterministic event expansion used by authority and visual clients.
+	/// It has no actor, renderer, or b3-world dependency.
+	BOX3DRUNTIME_API bool GenerateEventFragments(const Fracture::FFractureProxy& Proxy,
+		const FTransform& ComponentToWorld, const FBox3DDestructionEvent& Event,
+		TArray<Fracture::FBox3DFragmentData>& OutFragments);
+
+	/// Initial D4/D5 bond-health digest for an event's fragment graph. This uses
+	/// the same structure graph and stress-solver hash as live structural actors,
+	/// but needs no physics world or anchor query.
+	BOX3DRUNTIME_API uint32 InitialBondHealthHash(
+		const TArray<Fracture::FBox3DFragmentData>& Fragments, float FragmentDensity);
 }

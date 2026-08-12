@@ -109,7 +109,7 @@ public:
 	/// components stay inert and queries return empty there. Evaluated once at
 	/// subsystem initialization from the world's net mode.
 	UFUNCTION(BlueprintPure, Category = "Box3D|Networking")
-	bool IsSimulationAuthority() const { return bSimulationAuthority; }
+	bool IsSimulationAuthority() const;
 
 	/// Fraction [0, 1] of the way from the last fixed step to the next, for
 	/// interpolating raw-body visuals the way bInterpolateBodyTransforms

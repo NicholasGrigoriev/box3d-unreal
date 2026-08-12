@@ -10,6 +10,11 @@ class UMaterialInterface;
 class UNiagaraSystem;
 class UStaticMeshComponent;
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FBox3DDestructionEventGeneratedSignature,
+	FBox3DDestructionEvent, Event, int64, LayoutHash);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FBox3DDestructionCorrectionRequiredSignature,
+	FName, MeshId, int64, AuthorityLayoutHash, int64, LocalLayoutHash);
+
 /// Opt-in destructible marker — the designer-facing surface of the D3 damage
 /// pipeline. Drop it on an actor whose static mesh should fracture and it wires
 /// the whole intake: the static scene mirror enables hit events on the mesh's
@@ -90,10 +95,36 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Tiers")
 	TObjectPtr<UNiagaraSystem> DebrisSystem;
 
+	/// Authority-only hook emitted after ApplyImpact makes and applies a fracture
+	/// decision. Game code forwards Event + LayoutHash through its RPC or GAS
+	/// channel; the plugin deliberately has no dependency on either transport.
+	UPROPERTY(BlueprintAssignable, Category = "Box3D|Networking")
+	FBox3DDestructionEventGeneratedSignature OnDestructionEventGenerated;
+
+	/// A received event regenerated a different layout. Game code should request
+	/// server-authoritative fragment state; predicted fragment bodies can feed
+	/// those states to Box3D::ReconcileAndReplay.
+	UPROPERTY(BlueprintAssignable, Category = "Box3D|Networking")
+	FBox3DDestructionCorrectionRequiredSignature OnDestructionCorrectionRequired;
+
+	/// Build the deterministic replication tuple without applying it. This is an
+	/// authority-only fracture decision; false means absorbed damage, no target,
+	/// an already-fractured target, or no simulation authority.
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Networking")
+	bool BuildDestructionEvent(FVector WorldLocation, float EnergyJoules,
+		FBox3DDestructionEvent& OutEvent) const;
+
+	/// Apply an authority event to this component. Authority instances build b3
+	/// fragment bodies; non-authority/no-world clients build the identical PMC
+	/// visual set only. AuthorityLayoutHash = 0 skips validation (server path).
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Networking",
+		meta = (AdvancedDisplay = "AuthorityLayoutHash"))
+	ABox3DFracturedActor* ApplyDestructionEvent(const FBox3DDestructionEvent& Event,
+		int64 AuthorityLayoutHash, FBox3DDestructionEventResult& OutResult);
+
 	/// Deal impact damage at a world location. Maps the energy (J) through
-	/// EnergyToCells and fractures the target mesh when it clears MinEnergy.
-	/// Returns the fractured actor, or null when the energy was absorbed, the
-	/// mesh already fractured, or no fracturable mesh exists on the owner.
+	/// EnergyToCells, applies the event locally, then emits
+	/// OnDestructionEventGenerated for game-side replication.
 	UFUNCTION(BlueprintCallable, Category = "Box3D|Damage")
 	ABox3DFracturedActor* ApplyImpact(FVector WorldLocation, float EnergyJoules);
 

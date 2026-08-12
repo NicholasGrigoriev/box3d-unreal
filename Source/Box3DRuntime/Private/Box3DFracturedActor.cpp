@@ -221,7 +221,7 @@ ABox3DFracturedActor::ABox3DFracturedActor()
 }
 
 void ABox3DFracturedActor::InitializeFragments(TArray<FBox3DFragmentData>&& InFragments,
-	UMaterialInterface* SourceMaterial)
+	UMaterialInterface* SourceMaterial, bool bCreatePhysics)
 {
 	DestroyFragmentPhysics();
 	SectionGeometry.Reset();
@@ -276,14 +276,17 @@ void ABox3DFracturedActor::InitializeFragments(TArray<FBox3DFragmentData>&& InFr
 		FragmentSections[FragmentIndex].Y = CreateSection(Interior, InteriorMaterial);
 	}
 
-	BuildFragmentPhysics();
-	InitializeStructure();
-
-	// Join the fragment pool last: registration may evict older fractured actors
-	// to make room, and this actor's own footprint must be final by then.
-	if (UBox3DWorldSubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UBox3DWorldSubsystem>() : nullptr)
+	if (bCreatePhysics)
 	{
-		Subsystem->RegisterFracturedActor(this);
+		BuildFragmentPhysics();
+		InitializeStructure();
+
+		// Join the fragment pool last: registration may evict older fractured actors
+		// to make room, and this actor's own footprint must be final by then.
+		if (UBox3DWorldSubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UBox3DWorldSubsystem>() : nullptr)
+		{
+			Subsystem->RegisterFracturedActor(this);
+		}
 	}
 }
 
@@ -1038,7 +1041,14 @@ namespace Box3D
 		return EBox3DFractureProxySource::None;
 	}
 
-	ABox3DFracturedActor* FractureMesh(UStaticMeshComponent* Component, const FBox3DFractureMeshParams& Params)
+	FName GetDestructionMeshId(const UStaticMeshComponent& Component)
+	{
+		const UStaticMesh* StaticMesh = Component.GetStaticMesh();
+		return StaticMesh != nullptr ? FName(*StaticMesh->GetPathName()) : NAME_None;
+	}
+
+	static ABox3DFracturedActor* FractureMeshInternal(UStaticMeshComponent* Component,
+		const FBox3DFractureMeshParams& Params, bool bCreatePhysics)
 	{
 		if (Component == nullptr || Component->GetWorld() == nullptr)
 		{
@@ -1092,7 +1102,7 @@ namespace Box3D
 		Actor->DebrisSystem = Params.DebrisSystem;
 		// Fragment/actor space impact, already converted for the fracture core.
 		Actor->DebrisImpactPoint = FractureParams.ImpactPoint;
-		Actor->InitializeFragments(MoveTemp(Fragments), Component->GetMaterial(0));
+		Actor->InitializeFragments(MoveTemp(Fragments), Component->GetMaterial(0), bCreatePhysics);
 
 		// Swap the source out: the fractured actor owns the visuals from here, and
 		// nothing should collide with the intact mesh anymore.
@@ -1107,5 +1117,24 @@ namespace Box3D
 		}
 
 		return Actor;
+	}
+
+	ABox3DFracturedActor* FractureMesh(UStaticMeshComponent* Component, const FBox3DFractureMeshParams& Params)
+	{
+		UBox3DWorldSubsystem* Subsystem = Component != nullptr && Component->GetWorld() != nullptr
+			? Component->GetWorld()->GetSubsystem<UBox3DWorldSubsystem>()
+			: nullptr;
+		if (Subsystem == nullptr || !Subsystem->IsSimulationAuthority())
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("Box3D::FractureMesh rejected without simulation authority"));
+			return nullptr;
+		}
+		return FractureMeshInternal(Component, Params, true);
+	}
+
+	ABox3DFracturedActor* RegenerateFractureVisuals(
+		UStaticMeshComponent* Component, const FBox3DFractureMeshParams& Params)
+	{
+		return FractureMeshInternal(Component, Params, false);
 	}
 }
