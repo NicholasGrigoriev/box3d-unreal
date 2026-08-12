@@ -9,6 +9,7 @@
 #include "Box3DDestruction.h"
 #include "Box3DFracturedActor.h"
 #include "Box3DJointComponent.h"
+#include "Box3DPlasticHingeComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/Actor.h"
 #include "Box3DPropConversion.h"
@@ -349,6 +350,19 @@ void UBox3DWorldSubsystem::StepFixed(float FixedDeltaTime, int32 SubSteps)
 	b3World_Step(WorldId, FixedDeltaTime, SubSteps);
 	++StepCount;
 
+	for (int32 Index = 0; Index < PlasticHinges.Num();)
+	{
+		if (UBox3DPlasticHingeComponent* Hinge = PlasticHinges[Index].Get())
+		{
+			Hinge->HandlePostBox3DStep();
+			++Index;
+		}
+		else
+		{
+			PlasticHinges.RemoveAt(Index);
+		}
+	}
+
 	// One-time heartbeat so logs (including headless runs) confirm stepping works.
 	if (StepCount == 60)
 	{
@@ -504,6 +518,16 @@ void UBox3DWorldSubsystem::PushKinematicTargets(float FixedDeltaTime)
 void UBox3DWorldSubsystem::AddPendingJoint(UBox3DJointComponent* Joint)
 {
 	PendingJoints.AddUnique(Joint);
+}
+
+void UBox3DWorldSubsystem::RegisterPlasticHinge(UBox3DPlasticHingeComponent* Hinge)
+{
+	PlasticHinges.AddUnique(Hinge);
+}
+
+void UBox3DWorldSubsystem::UnregisterPlasticHinge(UBox3DPlasticHingeComponent* Hinge)
+{
+	PlasticHinges.Remove(Hinge);
 }
 
 void UBox3DWorldSubsystem::CreatePendingJoints()

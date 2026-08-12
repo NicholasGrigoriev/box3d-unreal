@@ -284,6 +284,18 @@ on forced rollback, and carries a 1 m authoritative correction through replay.
       correct-first overload break with actor integration, explosion event intake,
       600-step stable gravity/no-damage, and deterministic erosion/break hash progression.
 
+- [x] **D6 — metal deformation** ✅ 2026-08-12 — three independent tiers:
+      deterministic fixed-order vertex denting on fracture PMC sections with
+      radius/falloff/depth clamp and collision left untouched; asset-free
+      per-mesh R8 dent-map ping-pong with shared material parameters and
+      `box3d.DentTest`; and `UBox3DPlasticHingeComponent`, an ideal
+      elastic-perfectly-plastic two-body revolute girder hinge. Hinge response
+      commits the analytic excess beyond `YieldTorque / ElasticStiffness` to
+      its permanent spring rest angle, updates an optional spline-mesh visual,
+      and hands angle failure through the existing exactly-once
+      `OnJointBroke` path. 7 automation tests (108 total), plus the required
+      dent-map rendered-eyeball path verified offscreen.
+
 ---
 
 ## Non-goals (for now)

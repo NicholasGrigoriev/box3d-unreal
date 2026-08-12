@@ -7,6 +7,8 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Box3DJointComponent.h"
+#include "Box3DPlasticHingeComponent.h"
+#include "Components/SplineMeshComponent.h"
 #include "Tests/Box3DTestEventCounter.h"
 #include "Tests/Box3DTestHelpers.h"
 
@@ -290,6 +292,139 @@ bool FBox3DJointWheelTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("spin motor reaches 180 deg/s"), static_cast<float>(Omega.Size()), UE_PI, UE_PI * 0.15f);
 	TestTrue(FString::Printf(TEXT("spin axis is the wheel axle (w=%s)"), *Omega.ToCompactString()),
 		FMath::Abs(Omega.Y) / FMath::Max(Omega.Size(), 0.001) > 0.95);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DPlasticHingeBelowYieldTest,
+	"Box3DUnreal.MetalDeformation.PlasticHingeBelowYieldReturn", BOX3D_TEST_FLAGS)
+bool FBox3DPlasticHingeBelowYieldTest::RunTest(const FString& Parameters)
+{
+	FBox3DPlasticHingeResponse Analytic;
+	Analytic.YieldTorqueNm = 50.0f;
+	Analytic.ElasticStiffnessNmPerDegree = 10.0f;
+	Analytic.BreakAngleDegrees = 30.0f;
+	float PlasticIncrement = 0.0f;
+	float RestoringTorque = 0.0f;
+	TestTrue(TEXT("four-degree bend stays elastic"),
+		Analytic.Advance(4.0f, PlasticIncrement, RestoringTorque)
+			== EBox3DPlasticHingeTransition::None);
+	TestEqual(TEXT("elastic bend commits no permanent rest angle"), Analytic.RestAngleDegrees, 0.0f);
+	TestEqual(TEXT("elastic response points back toward rest"), RestoringTorque, -40.0f);
+
+	Box3DTest::FTestWorld Test;
+	const FVector Pivot(0, 0, 300);
+	UBox3DBodyComponent* SideA = SpawnBoxBody(Test, Pivot, 20.0f, /*gravity*/ 0.0f);
+	UBox3DBodyComponent* SideB = SpawnBoxBody(Test, Pivot, 20.0f, /*gravity*/ 0.0f);
+	UBox3DPlasticHingeComponent* Hinge = SpawnJoint<UBox3DPlasticHingeComponent>(
+		SideB, FTransform(Pivot), [&](UBox3DPlasticHingeComponent& J)
+	{
+		J.ConnectedActor = SideA->GetOwner();
+		J.YieldTorque = 50.0f;
+		J.ElasticStiffness = 10.0f;
+		J.BreakAngle = 30.0f;
+		J.SpringHertz = 5.0f;
+		J.SpringDampingRatio = 1.0f;
+	});
+	TestTrue(TEXT("two-body plastic hinge created"), Hinge->IsJointActive());
+
+	float MaxElasticAngle = 0.0f;
+	for (int32 StepIndex = 0; StepIndex < 30; ++StepIndex)
+	{
+		SideB->AddTorque(FVector(0.0, 0.0, 10.0 / 0.0001)); // 10 N*m at the UE-unit seam
+		Test.Step();
+		MaxElasticAngle = FMath::Max(MaxElasticAngle, FMath::Abs(Hinge->GetJointAngle()));
+	}
+	TestTrue(TEXT("the below-yield applied torque deflected the hinge"), MaxElasticAngle > 0.05f);
+	TestTrue(TEXT("the applied torque stayed inside the five-degree elastic limit"), MaxElasticAngle < 5.0f);
+	Test.Step(180);
+	TestTrue(TEXT("below-yield applied torque returns to the spring rest angle"),
+		FMath::Abs(Hinge->GetJointAngle()) < 0.5f);
+	TestEqual(TEXT("runtime hinge retained its original rest angle"),
+		Hinge->GetPermanentRestAngle(), 0.0f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DPlasticHingeAboveYieldTest,
+	"Box3DUnreal.MetalDeformation.PlasticHingeAboveYieldAnalyticIncrement", BOX3D_TEST_FLAGS)
+bool FBox3DPlasticHingeAboveYieldTest::RunTest(const FString& Parameters)
+{
+	FBox3DPlasticHingeResponse Analytic;
+	Analytic.YieldTorqueNm = 50.0f;
+	Analytic.ElasticStiffnessNmPerDegree = 10.0f;
+	Analytic.BreakAngleDegrees = 30.0f;
+	float PlasticIncrement = 0.0f;
+	float RestoringTorque = 0.0f;
+	TestTrue(TEXT("twelve-degree bend yields"),
+		Analytic.Advance(12.0f, PlasticIncrement, RestoringTorque)
+			== EBox3DPlasticHingeTransition::Yielded);
+	TestEqual(TEXT("plastic increment is angle minus five-degree elastic limit"),
+		PlasticIncrement, 7.0f);
+	TestEqual(TEXT("permanent rest angle advances analytically"), Analytic.RestAngleDegrees, 7.0f);
+	TestEqual(TEXT("restoring torque is capped at yield"), RestoringTorque, -50.0f);
+
+	Box3DTest::FTestWorld Test;
+	const FVector Pivot(0, 0, 300);
+	UBox3DBodyComponent* SideA = SpawnBoxBody(Test, Pivot, 20.0f, /*gravity*/ 0.0f);
+	UBox3DBodyComponent* SideB = SpawnBoxBody(Test, Pivot, 20.0f, /*gravity*/ 0.0f);
+	USplineMeshComponent* Spline = NewObject<USplineMeshComponent>(SideB->GetOwner());
+	Spline->RegisterComponent();
+	UBox3DPlasticHingeComponent* Hinge = SpawnJoint<UBox3DPlasticHingeComponent>(
+		SideB, FTransform(Pivot), [&](UBox3DPlasticHingeComponent& J)
+	{
+		J.ConnectedActor = SideA->GetOwner();
+		J.YieldTorque = 50.0f;
+		J.ElasticStiffness = 10.0f;
+		J.BreakAngle = 30.0f;
+		J.VisualSpline = Spline;
+		J.VisualHalfLength = 100.0f;
+	});
+	for (int32 StepIndex = 0; StepIndex < 10 && FMath::IsNearlyZero(Hinge->GetPermanentRestAngle()); ++StepIndex)
+	{
+		SideB->AddTorque(FVector(0.0, 0.0, 500.0 / 0.0001)); // 500 N*m
+		Test.Step();
+	}
+	const float YieldAngle = Hinge->YieldTorque / Hinge->ElasticStiffness;
+	const float MeasuredAngle = Hinge->GetJointAngle();
+	const float ExpectedRestAngle = MeasuredAngle - FMath::Sign(MeasuredAngle) * YieldAngle;
+	TestTrue(TEXT("above-yield applied torque committed a permanent bend"),
+		!FMath::IsNearlyZero(Hinge->GetPermanentRestAngle()));
+	TestEqual(TEXT("runtime rest advances by the analytic plastic increment"),
+		Hinge->GetPermanentRestAngle(), ExpectedRestAngle, 0.001f);
+	TestEqual(TEXT("yield updates the live revolute spring target"),
+		Hinge->TargetAngle, ExpectedRestAngle, 0.001f);
+	const float BendRadians = FMath::DegreesToRadians(MeasuredAngle);
+	TestTrue(TEXT("asset-optional spline endpoint follows the measured bend angle"),
+		Spline->GetEndPosition().Equals(FVector(100.0f * FMath::Cos(BendRadians),
+			100.0f * FMath::Sin(BendRadians), 0.0), 0.01));
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DPlasticHingeBreakTest,
+	"Box3DUnreal.MetalDeformation.PlasticHingeBreakAngleEvent", BOX3D_TEST_FLAGS)
+bool FBox3DPlasticHingeBreakTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld Test;
+	const FVector Pivot(0, 0, 300);
+	UBox3DBodyComponent* SideA = SpawnBoxBody(Test, Pivot, 20.0f, /*gravity*/ 0.0f);
+	UBox3DBodyComponent* SideB = SpawnBoxBody(Test, Pivot, 20.0f, /*gravity*/ 0.0f);
+	UBox3DPlasticHingeComponent* Hinge = SpawnJoint<UBox3DPlasticHingeComponent>(
+		SideB, FTransform(Pivot), [&](UBox3DPlasticHingeComponent& J)
+	{
+		J.ConnectedActor = SideA->GetOwner();
+		J.BreakAngle = 20.0f;
+	});
+	UBox3DTestEventCounter* Counter = NewObject<UBox3DTestEventCounter>();
+	Hinge->OnJointBroke.AddDynamic(Counter, &UBox3DTestEventCounter::HandleJointBroke);
+
+	Hinge->UpdatePlasticityAtAngle(20.0f);
+	TestFalse(TEXT("break-angle transition destroys the revolute joint"), Hinge->IsJointActive());
+	TestTrue(TEXT("plastic response records its terminal transition"), Hinge->HasAngleBroken());
+	TestEqual(TEXT("angle break uses the existing joint-break event"), Counter->JointBrokeCount, 1);
+	Hinge->UpdatePlasticityAtAngle(25.0f);
+	TestEqual(TEXT("break event fires exactly once"), Counter->JointBrokeCount, 1);
 
 	return true;
 }

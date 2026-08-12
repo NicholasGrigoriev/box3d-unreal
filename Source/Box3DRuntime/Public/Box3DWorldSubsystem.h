@@ -10,6 +10,7 @@ class ABox3DFracturedActor;
 class UBox3DBodyComponent;
 class UBox3DDestructibleComponent;
 class UBox3DJointComponent;
+class UBox3DPlasticHingeComponent;
 class FBox3DBakedScene;
 class FBox3DUETaskPool;
 class FBox3DDebugDrawer;
@@ -173,6 +174,11 @@ public:
 	/// before each tick's stepping until creation succeeds or attempts run out.
 	void AddPendingJoint(UBox3DJointComponent* Joint);
 
+	/// Plastic hinges are sampled in registration order after every fixed step so
+	/// yielding and angle-break transitions stay deterministic.
+	void RegisterPlasticHinge(UBox3DPlasticHingeComponent* Hinge);
+	void UnregisterPlasticHinge(UBox3DPlasticHingeComponent* Hinge);
+
 	/// Destructible markers register themselves on BeginPlay. The hit-event pump
 	/// routes mirror-body impacts to them, and Box3DExplode's fracture energy
 	/// fans out over this registry.
@@ -285,6 +291,7 @@ private:
 
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> KinematicBodies;
 	TArray<TWeakObjectPtr<UBox3DJointComponent>> PendingJoints;
+	TArray<TWeakObjectPtr<UBox3DPlasticHingeComponent>> PlasticHinges;
 	TArray<TWeakObjectPtr<UBox3DDestructibleComponent>> Destructibles;
 
 	/// Live fractured actors in creation order (oldest first) — the fragment pool.
