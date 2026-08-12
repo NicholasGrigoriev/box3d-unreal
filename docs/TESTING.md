@@ -1,6 +1,7 @@
 # Box3D Unreal — Testing
 
-Two layers of verification:
+Two layers of verification. The current automation suite contains **110 tests**;
+43 are dedicated to fracture, destruction, structure, stress, and deformation.
 
 1. **Automation tests** (`Source/Box3DRuntime/Private/Tests/`) — deterministic,
    analytic assertions against synthetic game worlds. The authority on correctness.
@@ -80,6 +81,37 @@ deterministic. No latent commands, no wall-clock waits.
 | Snapshot | ring capacity window + eviction, capture/restore roundtrip bit-identical (hash), body-count mismatch rejected | `Snapshot.RingCaptureRestore` |
 | Snapshot | reconcile: no-op on agreement, forced rollback replays bit-identically (contact-free), 1 m authoritative correction carried through replay, out-of-window refusal | `Snapshot.ReconcileAndReplay` |
 
+The 42 foundational cases above are joined by 25 post-M6 integration tests:
+
+| Area | Count | Coverage / test prefix |
+| --- | ---: | --- |
+| Static mirror | 5 | discovery, streaming bookkeeping, ISM/HISM instances, scale, prop resting — `Mirror.*` |
+| Props | 3 | automatic simulated-actor conversion, actor conversion, instance extraction — `Props.*` |
+| Grab | 3 | mass limit/carry, throw/filter restore, break distance — `Grab.*` |
+| Soft bodies | 7 | rope hang/pin/cut/winch/tension/build direction and cloth drape — `SoftBody.*` |
+| Special actors | 3 | breakable shatter, conveyor drag, wind force — `Special.*` |
+| Interpolation | 1 | fixed-step transform midpoint — `Interpolation.Midpoint` |
+| Ragdoll | 1 | physics-asset body/joint build — `Ragdoll.BuildFromPhysicsAsset` |
+| Body follow-ups | 2 | ground-weight propagation and kinematic speed cap — `Body.GroundWeight`, `Body.KinematicTargetSpeedCap` |
+
+Destruction adds 43 deterministic tests (D1–D7):
+
+| Area | Count | Coverage / test prefix |
+| --- | ---: | --- |
+| Fracture core | 9 | repeat/seed/thread determinism, volume, valid hulls, adjacency, cell count, impact bias, minimum-volume merging — `Fracture.*` |
+| Fractured actor | 6 | proxy preference, sections/materials, source swap, adjacency welds, resting assembly, overload break — `FracturedActor.*` |
+| Damage + replication | 8 | energy curve, tiers, hit/blast intake, pool, budget, independent event-stream hashes, no-world visual client — `Destruction.*` |
+| Structure | 7 | graph build, event connectivity, bounded flood fill, anchors, bridge/tower collapse, promotion budget — `Structure.*` |
+| Stress | 6 | analytic cantilever, coarsening, correct-bond failure, explosion intake, 600-step stability, bond-health hash — `Stress.*` |
+| Vertex/dent-map deformation | 4 | fixed-order dent hash, depth clamp, render-target ping-pong, fractured-actor PMC dent — `Deform.*` |
+| Plastic hinges | 3 | below-yield return, analytic permanent bend, exactly-once angle break — `MetalDeformation.*` |
+
+The D7 replication tests are
+`Destruction.Replication.EventStreamDeterminism` (matching layout and initial
+bond-health hashes after every event in two independent worlds, plus mismatch
+correction) and `Destruction.Replication.ClientVisualWithoutWorld` (procedural
+sections with no Box3D bodies or welds).
+
 ## Known gaps (deliberate)
 
 - **Spherical cone/twist limits, wheel steering, parallel/filter joints,
@@ -111,6 +143,9 @@ deterministic. No latent commands, no wall-clock waits.
   output is eyeball-only; the shape cache and `b3World_Draw` dispatch it rides on
   are asserted with counting callbacks.
 - **`box3d.Benchmark`** — a measurement tool, not a test; results vary by machine.
+- **Dent-map material response** — ping-pong accumulation and parameter binding are
+  automation-tested, but normal reconstruction/WPO belongs to the project's
+  material and remains a rendered-eyeball check (`box3d.DentTest`).
 
 ## Smoke commands
 
@@ -120,3 +155,8 @@ Still useful for eyeballing behavior and stressing at scale:
 - `box3d.SmokeActors [N]` — full component pipeline with rendered meshes; logs
   settle state + query self-checks ~8 s after spawn when driven by
   `box3d.AutoSmokeActors N` (headless).
+
+Destruction's visual checks are consolidated in
+[DESTRUCTION.md](DESTRUCTION.md#demo-and-diagnostic-commands):
+`box3d.FractureDebug`, `box3d.Fracture`, `box3d.DestructionStress`,
+`box3d.SpawnStructure`, `box3d.DestroyChunk`, and `box3d.DentTest`.

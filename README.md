@@ -8,7 +8,7 @@ UnrealBuildTool; the plugin is fully standalone with no external build steps.
 
 ## Status
 
-**Beta / M6 complete — feature roadmap done.** The library compiles inside UE, a
+**Beta / M6 and deterministic destruction complete.** The library compiles inside UE, a
 physics world is stepped per game world at a fixed timestep, `UBox3DBodyComponent`
 gives actors Box3D rigid bodies with transform sync in both directions — primitive
 shapes (box/sphere/capsule with auto-fit), cooked convex hulls, exact triangle
@@ -65,7 +65,15 @@ a whole-world `FSnapshotRing`, and `ReconcileAndReplay` for client-side
 prediction against an authoritative server
 ([docs/NETWORKING.md](docs/NETWORKING.md)).
 
-All of it is pinned by a deterministic automation suite — 67 tests
+The destruction stack adds seeded, quantized Voronoi fracture; welded rendered
+fragments; energy-driven Body/Debris/Dust tiers and global budgets; anchored
+connectivity with stress-driven chain collapse; vertex dents, UV dent maps, and
+plastic girder hinges. Its transport-neutral multiplayer contract replicates
+`(MeshId, Impact, Seed, Params)`, validates layout hashes, regenerates visuals on
+no-physics clients, and exposes a server-correction seam
+([docs/DESTRUCTION.md](docs/DESTRUCTION.md)).
+
+All of it is pinned by a deterministic automation suite — 110 tests
 (`Automation RunTests Box3DUnreal`, see [docs/TESTING.md](docs/TESTING.md)).
 See [docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap,
 [docs/DESIGN.md](docs/DESIGN.md) for architecture decisions, and
@@ -78,9 +86,10 @@ Requires UE 5.7, C++ project.
 
 ## Tests
 
-67 automation tests cover conversion math, world stepping, body components, queries,
+110 automation tests cover conversion math, world stepping, body components, queries,
 mesh cooking, joints, gameplay events, threading, diagnostics, replay determinism,
-explosions, continuous collision, and snapshot/rollback with analytic assertions
+explosions, continuous collision, snapshot/rollback, deterministic fracture,
+destruction replication, structures, stress, and deformation with analytic assertions
 ([docs/TESTING.md](docs/TESTING.md)):
 
 ```
@@ -106,6 +115,10 @@ box3d.SmokeActors
 ```
 
 Either command with `0` clears its bodies.
+
+For destruction, start with `box3d.Fracture` or `box3d.FractureDebug`; the
+complete setup, multiplayer flow, budgets, structural demos, deformation commands,
+and troubleshooting guide is [docs/DESTRUCTION.md](docs/DESTRUCTION.md).
 
 Also useful: `box3d.DebugDraw 1` (wireframes of every physics shape, plus
 `box3d.DebugDraw.Contacts/Bounds/Mass/...`), `stat box3d` (step profile and world

@@ -226,7 +226,7 @@ on forced rollback, and carries a 1 m authoritative correction through replay.
 
 ---
 
-## Destruction (docs/DESTRUCTION_PLAN.md, branch feature/destruction)
+## Destruction ✅ 2026-08-12 ([DESTRUCTION.md](DESTRUCTION.md))
 
 - [x] **D1 — deterministic fracture core** ✅ 2026-08-11 — `Box3D::Fracture`:
       seeded quantized Voronoi sites (impact-biased via `RadialBias`),
@@ -295,6 +295,19 @@ on forced rollback, and carries a 1 m authoritative correction through replay.
       and hands angle failure through the existing exactly-once
       `OnJointBroke` path. 7 automation tests (108 total), plus the required
       dent-map rendered-eyeball path verified offscreen.
+
+- [x] **D7 — multiplayer, polish, and docs** ✅ 2026-08-12 — transport-neutral
+      `FBox3DDestructionEvent` tuple `(MeshId, Impact, Seed, Params)`; authority
+      gates on every fracture decision path; no-world clients regenerate the
+      identical procedural visual set with no Box3D state; layout and initial
+      bond-health hashes validate deterministic event expansion; mismatch
+      delegates expose the game-side authoritative correction seam, including
+      `Box3D::ReconcileAndReplay` for predicted fragment bodies. The complete
+      setup, RPC/GAS integration, tier/budget, structure/stress/deformation,
+      command, and troubleshooting guide lives in [DESTRUCTION.md](DESTRUCTION.md).
+      2 replication automation tests (110 total): matching layout/bond hashes
+      after every event in two independent worlds, mismatch correction coverage,
+      and a visual-only client path with procedural sections but zero bodies.
 
 ---
 
