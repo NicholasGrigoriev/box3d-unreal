@@ -9,6 +9,11 @@ namespace Box3D::Structure
 	{
 		Reset();
 		Nodes.SetNum(Fragments.Num());
+		for (int32 Index = 0; Index < Fragments.Num(); ++Index)
+		{
+			Nodes[Index].Centroid = Fragments[Index].Centroid;
+			Nodes[Index].Volume = Fragments[Index].Volume;
+		}
 
 		// Lower index owns each pair (Neighbors is symmetric with canonical
 		// areas), so every bond is created exactly once in fixed order. A node's
@@ -28,6 +33,8 @@ namespace Box3D::Structure
 				Bond.NodeA = Index;
 				Bond.NodeB = Neighbor.FragmentIndex;
 				Bond.Area = Neighbor.SharedFaceArea;
+				Bond.Centroid = (Fragments[Index].Centroid + Fragments[Neighbor.FragmentIndex].Centroid) * 0.5;
+				Bond.Normal = (Fragments[Neighbor.FragmentIndex].Centroid - Fragments[Index].Centroid).GetSafeNormal();
 				Nodes[Index].BondIndices.Add(BondIndex);
 				Nodes[Neighbor.FragmentIndex].BondIndices.Add(BondIndex);
 			}
@@ -49,6 +56,16 @@ namespace Box3D::Structure
 			Count += Bond.bBroken ? 0 : 1;
 		}
 		return Count;
+	}
+
+	FVector FBox3DStructureGraph::GetNodeCentroid(int32 NodeIndex) const
+	{
+		return Nodes.IsValidIndex(NodeIndex) ? Nodes[NodeIndex].Centroid : FVector::ZeroVector;
+	}
+
+	double FBox3DStructureGraph::GetNodeVolume(int32 NodeIndex) const
+	{
+		return Nodes.IsValidIndex(NodeIndex) ? Nodes[NodeIndex].Volume : 0.0;
 	}
 
 	int32 FBox3DStructureGraph::FindBond(int32 NodeA, int32 NodeB) const

@@ -29,6 +29,11 @@ namespace Box3D::Structure
 		/// scale (weld break forces and D5 stress capacity derive from it).
 		double Area = 0.0;
 
+		/// Bond midpoint and canonical normal in chunk-local centimetres. Normal
+		/// points NodeA -> NodeB; D5 uses it to split axial and shear load.
+		FVector Centroid = FVector::ZeroVector;
+		FVector Normal = FVector::ZeroVector;
+
 		/// Remaining health fraction in [0, 1]. D4 events snap it to zero; D5
 		/// stress overload erodes it gradually.
 		float Health = 1.0f;
@@ -77,6 +82,8 @@ namespace Box3D::Structure
 		int32 FindBond(int32 NodeA, int32 NodeB) const;
 
 		const FBox3DStructureBond& GetBond(int32 BondIndex) const { return Bonds[BondIndex]; }
+		FVector GetNodeCentroid(int32 NodeIndex) const;
+		double GetNodeVolume(int32 NodeIndex) const;
 
 		void SetAnchor(int32 NodeIndex, bool bAnchor);
 		bool IsAnchor(int32 NodeIndex) const;
@@ -95,6 +102,8 @@ namespace Box3D::Structure
 	private:
 		struct FNode
 		{
+			FVector Centroid = FVector::ZeroVector;
+			double Volume = 0.0;
 			bool bDestroyed = false;
 			bool bAnchor = false;
 
