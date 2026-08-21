@@ -10,7 +10,7 @@
 	"DocsURL": "https://box2d.org/posts/2026/06/announcing-box3d/",
 	"MarketplaceURL": "",
 	"SupportURL": "",
-	"EngineVersion": "5.7.0",
+	"EngineVersion": "5.8.0",
 	"CanContainContent": false,
 	"IsBetaVersion": true,
 	"IsExperimentalVersion": false,
