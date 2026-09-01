@@ -94,16 +94,16 @@ The 42 foundational cases above are joined by 25 post-M6 integration tests:
 | Ragdoll | 1 | physics-asset body/joint build — `Ragdoll.BuildFromPhysicsAsset` |
 | Body follow-ups | 2 | ground-weight propagation and kinematic speed cap — `Body.GroundWeight`, `Body.KinematicTargetSpeedCap` |
 
-Destruction adds 43 deterministic tests (D1–D7):
+Destruction adds 46 deterministic tests (D1–D7):
 
 | Area | Count | Coverage / test prefix |
 | --- | ---: | --- |
 | Fracture core | 9 | repeat/seed/thread determinism, volume, valid hulls, adjacency, cell count, impact bias, minimum-volume merging — `Fracture.*` |
-| Fractured actor | 6 | proxy preference, sections/materials, source swap, adjacency welds, resting assembly, overload break — `FracturedActor.*` |
+| Fractured actor | 9 | proxy preference, materials, source swap, adjacency welds, resting assembly, overload break, anchor-all detach, convex-proxy entry, render batching (one attached mesh, pooled chip components, rebuild only on change) — `FracturedActor.*` |
 | Damage + replication | 8 | energy curve, tiers, hit/blast intake, pool, budget, independent event-stream hashes, no-world visual client — `Destruction.*` |
 | Structure | 7 | graph build, event connectivity, bounded flood fill, anchors, bridge/tower collapse, promotion budget — `Structure.*` |
 | Stress | 6 | analytic cantilever, coarsening, correct-bond failure, explosion intake, 600-step stability, bond-health hash — `Stress.*` |
-| Vertex/dent-map deformation | 4 | fixed-order dent hash, depth clamp, render-target ping-pong, fractured-actor PMC dent — `Deform.*` |
+| Vertex/dent-map deformation | 4 | fixed-order dent hash, depth clamp, render-target ping-pong, fractured-actor chip dent — `Deform.*` |
 | Plastic hinges | 3 | below-yield return, analytic permanent bend, exactly-once angle break — `MetalDeformation.*` |
 
 The D7 replication tests are

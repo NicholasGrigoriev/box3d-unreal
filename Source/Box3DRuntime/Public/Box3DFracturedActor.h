@@ -5,13 +5,15 @@
 #include "Box3DFracture.h"
 #include "Box3DStructure.h"
 #include "Box3DStress.h"
+#include "Engine/TimerHandle.h"
 #include "GameFramework/Actor.h"
 #include "box3d/id.h"
 #include "Box3DFracturedActor.generated.h"
 
 class UMaterialInterface;
 class UNiagaraSystem;
-class UProceduralMeshComponent;
+class USceneComponent;
+class UStaticMesh;
 class UStaticMeshComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FBox3DFracturedWeldBrokeSignature);
@@ -32,6 +34,21 @@ enum class EBox3DFractureProxySource : uint8
 	SimpleCollision,
 	/// Convex hull of LOD0 render vertices — editor-only fallback, logs a warning.
 	RenderVertices,
+};
+
+/// How ABox3DFracturedActor currently draws one fragment.
+UENUM(BlueprintType)
+enum class EBox3DFragmentRenderState : uint8
+{
+	/// Not drawn: non-Body tier, or destroyed.
+	None,
+	/// Baked into the actor's shared attached mesh (one static mesh for every
+	/// fragment still held by the assembly; exterior and interior faces are its
+	/// two sections). Rebuilt only when the attached set changes.
+	Attached,
+	/// A free body: drawn by its own static mesh component, moved by transform
+	/// from the fragment body each tick.
+	Loose,
 };
 
 /// Inputs for Box3D::FractureMesh. Unlike the pure-geometry fracture core,
@@ -98,21 +115,35 @@ struct FBox3DFractureMeshParams
 
 	/// Health removed per second for each unit of overload above capacity.
 	float SustainedOverloadHealthPerSecond = 1.0f;
+
+	/// Render flags for every fragment primitive (the attached mesh and each
+	/// loose chip). Cladding over real geometry usually turns all three off:
+	/// the wall behind it already shadows, feeds Lumen and takes decals.
+	bool bCastShadow = true;
+	bool bAffectIndirectLighting = true;
+	bool bReceivesDecals = true;
 };
 
-/// A fractured static mesh: one ProceduralMeshComponent carrying up to two
-/// sections per fragment — exterior faces (inherited from the proxy surface)
-/// with the source component's material, interior cut faces with CoreMaterial.
-/// Spawned by Box3D::FractureMesh, which also swaps out the source component
-/// (hidden, Chaos collision off, static mirror body removed).
+/// A fractured static mesh. Fragments still held by the assembly (static
+/// bodies, or every fragment on the visual-only client path) are baked into ONE
+/// runtime static mesh — exterior faces (inherited from the proxy surface) in a
+/// section with the source component's material, interior cut faces in a
+/// section with CoreMaterial — so a settled ruin costs one static-relevance
+/// primitive however many pieces it has. A fragment whose body turns dynamic
+/// (DetachFragment, structural promotion, plain rubble) leaves that mesh for
+/// its own pooled static mesh component, which Tick moves by transform from
+/// the body; vertices are never rewritten per frame. Spawned by
+/// Box3D::FractureMesh, which also swaps out the source component (hidden,
+/// Chaos collision off, static mirror body removed).
 ///
-/// Each fragment gets a dynamic b3 hull body; adjacent fragments (cell
-/// adjacency from the fracture core, not bounds proximity) are welded with
-/// break force SharedFaceArea x MaterialToughness. Tick snaps overloaded welds
-/// (OnWeldBroken) and drives the PMC sections from the body transforms.
-/// Game code chips pieces off deliberately with DetachFragment (after finding
-/// them with FindFragmentAtPoint / FindNearestFragment) and removes them for
-/// good with DestroyFragment.
+/// Each fragment gets a b3 hull body; adjacent fragments (cell adjacency from
+/// the fracture core, not bounds proximity) are welded with break force
+/// SharedFaceArea x MaterialToughness. Tick snaps overloaded welds
+/// (OnWeldBroken). Game code chips pieces off deliberately with DetachFragment
+/// (after finding them with FindFragmentAtPoint / FindNearestFragment) and
+/// removes them for good with DestroyFragment. Render changes coalesce: they
+/// apply on the next SyncFragments (Tick) or, for a non-ticking actor, on a
+/// next-tick timer — FlushRenderState applies them at once.
 UCLASS(BlueprintType, NotBlueprintable, ClassGroup = (Physics))
 class BOX3DRUNTIME_API ABox3DFracturedActor : public AActor
 {
@@ -193,6 +224,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture")
 	TObjectPtr<UNiagaraSystem> DebrisSystem;
 
+	/// Render flags applied to every fragment primitive; see
+	/// FBox3DFractureMeshParams. Set before InitializeFragments.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture|Rendering")
+	bool bFragmentsCastShadow = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture|Rendering")
+	bool bFragmentsAffectIndirectLighting = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture|Rendering")
+	bool bFragmentsReceiveDecals = true;
+
+	/// Material of the exterior faces (the fractured component's material).
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Fracture")
+	TObjectPtr<UMaterialInterface> ExteriorMaterial;
+
 	/// One or more welds snapped this check.
 	UPROPERTY(BlueprintAssignable, Category = "Fracture")
 	FBox3DFracturedWeldBrokeSignature OnWeldBroken;
@@ -202,32 +248,58 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Fracture|Stress")
 	FBox3DStructureStressedSignature OnStructureStressed;
 
-	/// Build the mesh sections from fracture output. Fragment geometry is in
-	/// actor space (the source component's space with scale baked in, UE cm).
-	/// Exterior sections get SourceMaterial, interior sections CoreMaterial
+	/// Build the render geometry and physics from fracture output. Fragment
+	/// geometry is in actor space (the source component's space with scale baked
+	/// in, UE cm). Exterior faces get SourceMaterial, interior faces CoreMaterial
 	/// (falling back to SourceMaterial when unset). Visual-only initialization is
 	/// the replicated-client path: it deliberately creates no b3 bodies, welds,
-	/// structural state, or fragment-pool entry.
+	/// structural state, or fragment-pool entry, and draws every fragment in the
+	/// attached mesh.
 	void InitializeFragments(TArray<Box3D::Fracture::FBox3DFragmentData>&& InFragments,
 		UMaterialInterface* SourceMaterial, bool bCreatePhysics = true);
 
 	UFUNCTION(BlueprintPure, Category = "Fracture")
 	int32 GetFragmentCount() const { return Fragments.Num(); }
 
-	/// PMC section indices for a fragment: X = exterior section, Y = interior
-	/// section, INDEX_NONE where the fragment has no faces of that kind (fully
-	/// interior fragments have no exterior section).
-	FIntPoint GetFragmentSections(int32 FragmentIndex) const
+	/// How the fragment is drawn right now (pending changes apply on the next
+	/// SyncFragments / FlushRenderState).
+	UFUNCTION(BlueprintPure, Category = "Fracture|Rendering")
+	EBox3DFragmentRenderState GetFragmentRenderState(int32 FragmentIndex) const
 	{
-		return FragmentSections.IsValidIndex(FragmentIndex) ? FragmentSections[FragmentIndex]
-															: FIntPoint(INDEX_NONE, INDEX_NONE);
+		return FragmentRenderStates.IsValidIndex(FragmentIndex) ? FragmentRenderStates[FragmentIndex]
+																: EBox3DFragmentRenderState::None;
 	}
+
+	/// The component drawing a Loose fragment; null for Attached / None.
+	UFUNCTION(BlueprintPure, Category = "Fracture|Rendering")
+	UStaticMeshComponent* GetFragmentComponent(int32 FragmentIndex) const
+	{
+		return FragmentComponents.IsValidIndex(FragmentIndex) ? FragmentComponents[FragmentIndex].Get() : nullptr;
+	}
+
+	/// The shared mesh of every Attached fragment (its static mesh is null while
+	/// nothing is attached).
+	UStaticMeshComponent* GetAttachedMesh() const { return AttachedMesh; }
+
+	UFUNCTION(BlueprintPure, Category = "Fracture|Rendering")
+	int32 CountLooseFragments() const;
+
+	/// Primitives this actor currently submits: the attached mesh (when it has
+	/// geometry) plus one per Loose fragment.
+	UFUNCTION(BlueprintPure, Category = "Fracture|Rendering")
+	int32 GetRenderPrimitiveCount() const;
+
+	/// Static meshes built so far (attached rebuilds + chip meshes); a settled
+	/// actor must not grow this from Tick.
+	int32 GetRenderBuildCount() const { return RenderBuildCount; }
+
+	/// Render vertices of a Body-tier fragment, relative to its centroid in the
+	/// spawn frame (the body frame); null for fragments that are not drawn.
+	const TArray<FVector>* GetFragmentRenderVertices(int32 FragmentIndex) const;
 
 	/// Fracture geometry this actor renders and simulates (fragment vertices
 	/// feed the hulls, Neighbors the welds).
 	const TArray<Box3D::Fracture::FBox3DFragmentData>& GetFragments() const { return Fragments; }
-
-	UProceduralMeshComponent* GetMesh() const { return Mesh; }
 
 	UFUNCTION(BlueprintPure, Category = "Fracture")
 	int32 GetLiveWeldCount() const { return Welds.Num(); }
@@ -262,9 +334,9 @@ public:
 	/// from Tick; public so headless tests can pump it without ticking actors.
 	void CheckWelds();
 
-	/// Remove one fragment from the assembly: destroy its body and welds, clear
-	/// its mesh sections, and in structural mode notify the structure graph and
-	/// queue any unsupported islands for promotion. No-op on invalid or
+	/// Remove one fragment from the assembly: destroy its body and welds, stop
+	/// drawing it, and in structural mode notify the structure graph and queue
+	/// any unsupported islands for promotion. No-op on invalid or
 	/// already-destroyed fragments.
 	UFUNCTION(BlueprintCallable, Category = "Fracture")
 	void DestroyFragment(int32 FragmentIndex);
@@ -347,25 +419,48 @@ public:
 	/// Deterministic digest of current bond health and last resolved loads.
 	uint32 GetStructureStressHash() const { return StressSolver.BondHealthHash(); }
 
-	/// Stamp a deterministic cosmetic dent into every fragment PMC section in
-	/// range. ImpactNormal points out of the struck surface; vertices move inward
-	/// by the radial falloff, capped at MaxDepthCm for this stamp. The render
-	/// geometry changes immediately; fragment hull collision is deliberately
-	/// untouched. Returns the number of displaced section vertices.
+	/// Stamp a deterministic cosmetic dent into every drawn fragment in range.
+	/// ImpactNormal points out of the struck surface; vertices move inward by
+	/// the radial falloff, capped at MaxDepthCm for this stamp. The affected
+	/// meshes are rebuilt immediately; fragment hull collision is deliberately
+	/// untouched. Returns the number of displaced render vertices.
 	UFUNCTION(BlueprintCallable, Category = "Fracture|Deformation",
 		meta = (AdvancedDisplay = "FalloffExponent"))
 	int32 ApplyVertexDent(FVector WorldImpactPoint, FVector WorldImpactNormal,
 		float RadiusCm, float MaxDepthCm, float FalloffExponent = 2.0f);
 
-	/// Re-emit PMC sections from the fragment body transforms (awake bodies
-	/// only). Runs from Tick; public for headless tests.
+	/// Apply pending render changes, then move every Loose fragment's component
+	/// to its body transform (awake bodies only). Runs from Tick; public for
+	/// headless tests.
 	void SyncFragments();
+
+	/// Apply pending render changes now: fragments whose body turned dynamic get
+	/// their own component, destroyed ones stop drawing, and the attached mesh is
+	/// rebuilt when its set changed. Idempotent; a no-op when nothing is pending.
+	UFUNCTION(BlueprintCallable, Category = "Fracture|Rendering")
+	void FlushRenderState();
 
 	//~ AActor
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
 private:
+	/// Flat-shaded render geometry of one Body-tier fragment: vertices relative
+	/// to the centroid in the spawn frame (the body frame), one vertex per face
+	/// corner; UVs planar in actor space so they stay continuous across the
+	/// attached mesh. Triangles index Vertices, split by material.
+	struct FFragmentRenderGeometry
+	{
+		TArray<FVector> Vertices;
+		TArray<FVector> Normals;
+		TArray<FVector> Tangents;
+		TArray<float> BinormalSigns;
+		TArray<FVector2D> UVs;
+		TArray<int32> ExteriorTriangles;
+		TArray<int32> InteriorTriangles;
+	};
+	static void BuildRenderGeometry(const Box3D::Fracture::FBox3DFragmentData& Fragment, FFragmentRenderGeometry& Out);
+
 	void BuildFragmentPhysics();
 	void DestroyFragmentPhysics();
 
@@ -387,18 +482,61 @@ private:
 
 	/// Fire-and-forget DebrisSystem spawn carrying the burst arrays, world space.
 	void SpawnDebrisBurst() const;
+
+	/// Render state a fragment should be in given its tier, destroyed flag and
+	/// body type.
+	EBox3DFragmentRenderState DesiredRenderState(int32 FragmentIndex) const;
+
+	/// Flag the render state stale; FlushRenderState runs from the next
+	/// SyncFragments or, for a non-ticking actor, from a next-tick timer.
+	void MarkRenderDirty();
+
+	/// Bake the given fragments into a transient static mesh: two material
+	/// slots (exterior / interior), empty ones dropped. Actor space unless
+	/// bCentroidRelative (chip meshes, body frame). Null when nothing to draw.
+	UStaticMesh* BuildStaticMesh(TArrayView<const int32> FragmentIndices, bool bCentroidRelative);
+
+	void RebuildAttachedMesh();
+	void MakeFragmentLoose(int32 FragmentIndex);
+	void ReleaseFragmentComponent(int32 FragmentIndex);
+	UStaticMeshComponent* AcquireFragmentComponent();
+	void ApplyRenderFlags(UPrimitiveComponent& Component) const;
+	void SyncFragmentComponent(int32 FragmentIndex) const;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Fracture", meta = (AllowPrivateAccess = "true"))
-	TObjectPtr<UProceduralMeshComponent> Mesh;
+	TObjectPtr<USceneComponent> FractureRoot;
+
+	/// Shared mesh of the Attached fragments.
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Fracture", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UStaticMeshComponent> AttachedMesh;
+
+	/// Per-fragment chip component, parallel to Fragments; null unless Loose.
+	UPROPERTY()
+	TArray<TObjectPtr<UStaticMeshComponent>> FragmentComponents;
+
+	/// Chip components released by destroyed fragments, kept hidden for reuse.
+	UPROPERTY()
+	TArray<TObjectPtr<UStaticMeshComponent>> FreeFragmentComponents;
 
 	TArray<Box3D::Fracture::FBox3DFragmentData> Fragments;
+
+	/// Per-fragment render state, parallel to Fragments.
+	TArray<EBox3DFragmentRenderState> FragmentRenderStates;
+
+	/// Set by DestroyFragment, parallel to Fragments.
+	TArray<bool> FragmentDestroyed;
+
+	/// Parallel to Fragments; empty for non-Body tiers.
+	TArray<FFragmentRenderGeometry> RenderGeometry;
+
+	bool bRenderDirty = false;
+	FTimerHandle RenderFlushTimer;
+	int32 RenderBuildCount = 0;
 
 	/// Per-fragment tier, parallel to Fragments.
 	TArray<EBox3DFragmentTier> FragmentTiers;
 
 	FBox3DDebrisBurst DebrisBurst;
-
-	/// Per-fragment (ExteriorSection, InteriorSection), INDEX_NONE = absent.
-	TArray<FIntPoint> FragmentSections;
 
 	/// Per-fragment dynamic hull body, parallel to Fragments.
 	TArray<b3BodyId> FragmentBodies;
@@ -429,17 +567,6 @@ private:
 	bool bStressSolveSeeded = false;
 	bool bStressImpulseSolve = false;
 
-	/// Body-local copy of one PMC section's geometry (vertices relative to the
-	/// fragment centroid, normals in the spawn frame) so SyncFragments can
-	/// re-emit it under the current body transform.
-	struct FSectionGeometry
-	{
-		int32 SectionIndex = INDEX_NONE;
-		int32 FragmentIndex = INDEX_NONE;
-		TArray<FVector> LocalVertices;
-		TArray<FVector> LocalNormals;
-	};
-	TArray<FSectionGeometry> SectionGeometry;
 };
 
 namespace Box3D

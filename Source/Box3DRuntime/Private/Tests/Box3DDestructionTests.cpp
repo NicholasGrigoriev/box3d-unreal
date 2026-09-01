@@ -154,18 +154,17 @@ bool FBox3DDestructionTierRoutingTest::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("fragment %d tier matches its volume"), Index),
 			Tier == ClassifyFragmentTier(Fragments[Index].Volume, Params.Tiers));
 
-		const FIntPoint Sections = Actor->GetFragmentSections(Index);
 		const bool bHasBody = b3Body_IsValid(Actor->GetFragmentBody(Index));
-		const bool bHasSection = Sections.X != INDEX_NONE || Sections.Y != INDEX_NONE;
+		const bool bDrawn = Actor->GetFragmentRenderState(Index) != EBox3DFragmentRenderState::None;
 		if (Tier == EBox3DFragmentTier::Body)
 		{
 			TestTrue(FString::Printf(TEXT("Body fragment %d has a hull body"), Index), bHasBody);
-			TestTrue(FString::Printf(TEXT("Body fragment %d has PMC sections"), Index), bHasSection);
+			TestTrue(FString::Printf(TEXT("Body fragment %d is drawn"), Index), bDrawn);
 		}
 		else
 		{
 			TestFalse(FString::Printf(TEXT("non-Body fragment %d has no body"), Index), bHasBody);
-			TestFalse(FString::Printf(TEXT("non-Body fragment %d has no sections"), Index), bHasSection);
+			TestFalse(FString::Printf(TEXT("non-Body fragment %d is not drawn"), Index), bDrawn);
 		}
 	}
 

@@ -1,10 +1,12 @@
 // Tests for the D2 fractured actor: proxy resolution fallback order
 // (authored convex -> simple collision -> render vertices), fragment layout
-// parity between Box3D::FractureMesh and the pure fracture core, per-fragment
-// section materials, the source-component swap-out seam (visibility, Chaos
-// collision, static mirror body), and the physics half — hull bodies per
-// fragment, cell-adjacency welds with area-scaled break forces, rest-state
-// sleep, and overload-driven weld snapping with island separation.
+// parity between Box3D::FractureMesh and the pure fracture core, fragment
+// materials, the source-component swap-out seam (visibility, Chaos collision,
+// static mirror body), the physics half — hull bodies per fragment,
+// cell-adjacency welds with area-scaled break forces, rest-state sleep, and
+// overload-driven weld snapping with island separation — and the render model:
+// attached fragments baked into one static mesh, loose ones on pooled
+// transform-driven components, rebuilds only when the attached set changes.
 
 #include "Misc/AutomationTest.h"
 
@@ -13,9 +15,11 @@
 #include "Box3DConversion.h"
 #include "Box3DFracturedActor.h"
 #include "Box3DStaticSceneMirror.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "Materials/MaterialInterface.h"
 #include "PhysicsEngine/BodySetup.h"
-#include "ProceduralMeshComponent.h"
+#include "StaticMeshResources.h"
 #include "Tests/Box3DTestEventCounter.h"
 #include "Tests/Box3DTestHelpers.h"
 
@@ -67,6 +71,39 @@ namespace
 			Islands += Find(Index) == Index ? 1 : 0;
 		}
 		return Islands;
+	}
+
+	/// LOD0 sections of a component's static mesh (empty without a mesh).
+	TArrayView<const FStaticMeshSection> MeshSections(const UStaticMeshComponent* Component)
+	{
+		const UStaticMesh* StaticMesh = Component ? Component->GetStaticMesh() : nullptr;
+		const FStaticMeshRenderData* RenderData = StaticMesh ? StaticMesh->GetRenderData() : nullptr;
+		if (RenderData == nullptr || RenderData->LODResources.IsEmpty())
+		{
+			return {};
+		}
+		return RenderData->LODResources[0].Sections;
+	}
+
+	int32 MeshTriangleCount(const UStaticMeshComponent* Component)
+	{
+		int32 Count = 0;
+		for (const FStaticMeshSection& Section : MeshSections(Component))
+		{
+			Count += Section.NumTriangles;
+		}
+		return Count;
+	}
+
+	/// Triangles the actor's own render geometry holds for a fragment.
+	int32 FragmentTriangleCount(const ABox3DFracturedActor& Actor, int32 FragmentIndex)
+	{
+		int32 Count = 0;
+		for (const FBox3DFragmentFace& Face : Actor.GetFragments()[FragmentIndex].Faces)
+		{
+			Count += FMath::Max(Face.VertexIndices.Num() - 2, 0);
+		}
+		return Count;
 	}
 }
 
@@ -185,34 +222,41 @@ bool FBox3DFracturedActorFragmentLayoutTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("actor spawned at the source transform"),
 		Actor->GetActorLocation().Equals(Component->GetComponentLocation(), 0.1));
 
-	UProceduralMeshComponent* Mesh = Actor->GetMesh();
 	UMaterialInterface* SourceMaterial = Component->GetMaterial(0);
 	TestNotNull(TEXT("source material exists"), SourceMaterial);
 
-	int32 ExpectedSectionCount = 0;
+	// Plain rubble: every body is dynamic from the start, so each fragment draws
+	// through its own chip component and nothing is left for the attached mesh.
+	TestNull(TEXT("no attached geometry for dynamic rubble"), Actor->GetAttachedMesh()->GetStaticMesh());
+	TestEqual(TEXT("one primitive per fragment"), Actor->GetRenderPrimitiveCount(), Actor->GetFragmentCount());
+
 	int32 ExteriorSectionCount = 0;
 	for (int32 Index = 0; Index < Actor->GetFragmentCount(); ++Index)
 	{
-		const FIntPoint Sections = Actor->GetFragmentSections(Index);
+		TestEqual(FString::Printf(TEXT("fragment %d is loose"), Index), Actor->GetFragmentRenderState(Index),
+			EBox3DFragmentRenderState::Loose);
+		const UStaticMeshComponent* Chip = Actor->GetFragmentComponent(Index);
+		if (!TestNotNull(FString::Printf(TEXT("fragment %d has a chip component"), Index), Chip))
+		{
+			continue;
+		}
+		TestTrue(FString::Printf(TEXT("fragment %d slot 0 is the source material"), Index),
+			Chip->GetMaterial(0) == SourceMaterial);
+		TestTrue(FString::Printf(TEXT("fragment %d slot 1 is the core material"), Index),
+			Chip->GetMaterial(1) == GridMaterial);
+		TestEqual(FString::Printf(TEXT("fragment %d chip triangles match its faces"), Index), MeshTriangleCount(Chip),
+			FragmentTriangleCount(*Actor, Index));
 
 		// Every fragment of a 12-cell layout touches at least one neighbor.
-		TestTrue(FString::Printf(TEXT("fragment %d has an interior section"), Index), Sections.Y != INDEX_NONE);
-		if (Sections.Y != INDEX_NONE)
+		bool bHasInterior = false;
+		for (const FStaticMeshSection& Section : MeshSections(Chip))
 		{
-			++ExpectedSectionCount;
-			TestTrue(FString::Printf(TEXT("fragment %d interior faces carry the core material"), Index),
-				Mesh->GetMaterial(Sections.Y) == GridMaterial);
+			bHasInterior |= Section.MaterialIndex == 1;
+			ExteriorSectionCount += Section.MaterialIndex == 0 ? 1 : 0;
 		}
-		if (Sections.X != INDEX_NONE)
-		{
-			++ExpectedSectionCount;
-			++ExteriorSectionCount;
-			TestTrue(FString::Printf(TEXT("fragment %d exterior faces carry the source material"), Index),
-				Mesh->GetMaterial(Sections.X) == SourceMaterial);
-		}
+		TestTrue(FString::Printf(TEXT("fragment %d has an interior section"), Index), bHasInterior);
 	}
 	TestTrue(TEXT("some fragments expose exterior faces"), ExteriorSectionCount > 0);
-	TestEqual(TEXT("one PMC section per non-empty fragment side"), Mesh->GetNumSections(), ExpectedSectionCount);
 
 	return true;
 }
@@ -250,11 +294,14 @@ bool FBox3DFracturedActorSwapOutTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("mirror body removed"), Mirror->GetBodyCount(), 0);
 
 	// Null CoreMaterial falls back to the source material on interior faces.
-	const FIntPoint Sections = Actor->GetFragmentSections(0);
-	if (Sections.Y != INDEX_NONE)
+	if (const UStaticMeshComponent* Chip = Actor->GetFragmentComponent(0))
 	{
 		TestTrue(TEXT("interior falls back to the source material"),
-			Actor->GetMesh()->GetMaterial(Sections.Y) == Component->GetMaterial(0));
+			Chip->GetMaterial(1) == Component->GetMaterial(0));
+	}
+	else
+	{
+		AddError(TEXT("fragment 0 has no chip component"));
 	}
 
 	return true;
@@ -434,18 +481,16 @@ bool FBox3DFracturedActorOverloadBreakTest::RunTest(const FString& Parameters)
 	TestTrue(FString::Printf(TEXT("freed fragment separates (%f -> %f cm)"), InitialDistance, FinalDistance),
 		FinalDistance > InitialDistance + 50.0);
 
-	// The PMC sections follow the bodies: fragment 0 flew away from its spawn
-	// pose, so its synced section vertices sit far from the original geometry.
-	const FIntPoint Sections = Actor->GetFragmentSections(0);
-	const int32 SectionIndex = Sections.Y != INDEX_NONE ? Sections.Y : Sections.X;
-	const FProcMeshSection* Section = Actor->GetMesh()->GetProcMeshSection(SectionIndex);
-	if (TestNotNull(TEXT("fragment 0 has a PMC section"), Section) && Section->ProcVertexBuffer.Num() > 0)
+	// The chip component follows the body: fragment 0 flew away from its spawn
+	// pose, so its component sits at the body, far from the original geometry.
+	const UStaticMeshComponent* Chip = Actor->GetFragmentComponent(0);
+	if (TestNotNull(TEXT("fragment 0 has a chip component"), Chip))
 	{
-		const FVector SectionVertex(Section->ProcVertexBuffer[0].Position);
-		const FVector BodyPosition = Actor->GetActorTransform().InverseTransformPosition(
-			Box3D::ToUEPos(b3Body_GetPosition(Body0)));
-		TestTrue(TEXT("synced section rides the fragment body"),
-			FVector::Dist(SectionVertex, BodyPosition) < 200.0);
+		TestTrue(TEXT("synced component rides the fragment body"),
+			Chip->GetComponentLocation().Equals(Box3D::ToUEPos(b3Body_GetPosition(Body0)), 0.5));
+		TestTrue(TEXT("synced component sits off the spawn pose"),
+			FVector::Dist(Chip->GetComponentLocation(),
+				Actor->GetActorTransform().TransformPosition(Actor->GetFragments()[0].Centroid)) > 50.0);
 	}
 	return true;
 }
@@ -520,18 +565,28 @@ bool FBox3DFracturedActorAnchorAllDetachTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("nearest lookup agrees"), Actor->FindNearestFragment(TargetCentroid, 5.0f), Target);
 	TestEqual(TEXT("far point finds nothing"), Actor->FindFragmentAtPoint(TargetCentroid + FVector(0, 0, 300)), (int32)INDEX_NONE);
 
+	TestEqual(TEXT("anchored cladding draws as one primitive"), Actor->GetRenderPrimitiveCount(), 1);
 	TestTrue(TEXT("detach succeeds"), Actor->DetachFragment(Target, FVector(0, 0, 300), FVector(0, 0, 2)));
 	TestFalse(TEXT("detached fragment is no longer attached"), Actor->IsFragmentAttached(Target));
 	TestTrue(TEXT("detached fragment is still alive"), Actor->IsFragmentAlive(Target));
 	TestEqual(TEXT("attached count dropped by one"), Actor->CountAttachedFragments(), Alive - 1);
+	Actor->SyncFragments();
+	TestEqual(TEXT("detached fragment draws loose"), Actor->GetFragmentRenderState(Target), EBox3DFragmentRenderState::Loose);
+	TestNotNull(TEXT("detached fragment got its own component"), Actor->GetFragmentComponent(Target));
+	TestEqual(TEXT("attached mesh plus one chip"), Actor->GetRenderPrimitiveCount(), 2);
 	TestEqual(TEXT("moving chip is excluded from attached lookups"),
 		Actor->FindFragmentAtPoint(TargetCentroid, /*bAttachedOnly*/ true), (int32)INDEX_NONE);
 	TestFalse(TEXT("detaching an invalid index fails"), Actor->DetachFragment(999, FVector::ZeroVector));
 
 	Test.Step(30);
+	Actor->SyncFragments();
 	const FVector After = Actor->GetFragmentWorldCentroid(Target);
 	TestTrue(FString::Printf(TEXT("chip flew (moved %f cm)"), FVector::Dist(After, TargetCentroid)),
 		FVector::Dist(After, TargetCentroid) > 5.0);
+	if (const UStaticMeshComponent* Chip = Actor->GetFragmentComponent(Target))
+	{
+		TestTrue(TEXT("chip component tracks the body"), Chip->GetComponentLocation().Equals(After, 0.5));
+	}
 	for (int32 Index = 0; Index < Actor->GetFragmentCount(); ++Index)
 	{
 		if (Index == Target || !Actor->IsFragmentAlive(Index))
@@ -547,6 +602,10 @@ bool FBox3DFracturedActorAnchorAllDetachTest::RunTest(const FString& Parameters)
 	Actor->DestroyFragment(Target);
 	TestFalse(TEXT("detached chip can be destroyed"), Actor->IsFragmentAlive(Target));
 	TestEqual(TEXT("alive count reflects the destroy"), Actor->CountAliveFragments(), Alive - 1);
+	Actor->FlushRenderState();
+	TestEqual(TEXT("destroyed chip is not drawn"), Actor->GetFragmentRenderState(Target), EBox3DFragmentRenderState::None);
+	TestNull(TEXT("destroyed chip released its component"), Actor->GetFragmentComponent(Target));
+	TestEqual(TEXT("back to the attached mesh alone"), Actor->GetRenderPrimitiveCount(), 1);
 	Actor->DestroyFragment(Target);
 	TestEqual(TEXT("double destroy is a no-op"), Actor->CountAliveFragments(), Alive - 1);
 	return true;
@@ -581,13 +640,137 @@ bool FBox3DFracturedActorConvexProxyTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("placed at the proxy pose"), Actor->GetActorLocation().Equals(FVector(100, 200, 300), 0.01));
 	TestTrue(TEXT("anchored structure"), Actor->IsStructureActive());
 	TestEqual(TEXT("all attached"), Actor->CountAttachedFragments(), 3);
-	TestTrue(TEXT("sections rendered"), Actor->GetMesh()->GetNumSections() >= 3);
+	TestEqual(TEXT("one attached primitive"), Actor->GetRenderPrimitiveCount(), 1);
+	TestEqual(TEXT("exterior and interior sections"), MeshSections(Actor->GetAttachedMesh()).Num(), 2);
 	const FVector Expected = ProxyToWorld.TransformPosition(Actor->GetFragments()[0].Centroid);
 	TestTrue(TEXT("fragment centroid lands in world space"), Actor->GetFragmentWorldCentroid(0).Equals(Expected, 0.01));
 
 	TestTrue(TEXT("nudged detach"), Actor->DetachFragment(0, FVector::ZeroVector, FVector::ZeroVector, FVector(0, 0, 7)));
 	TestTrue(TEXT("chip moved by the nudge before any step"),
 		Actor->GetFragmentWorldCentroid(0).Equals(Expected + FVector(0, 0, 7), 0.05));
+	return true;
+}
+
+/// Render model of anchored cladding: every attached fragment is baked into one
+/// static mesh with a section per material; ticking a settled actor builds
+/// nothing; a detach moves the fragment onto its own component and rebuilds the
+/// attached mesh once without it; a destroyed chip returns its component to the
+/// pool for the next detach; render flags from the params reach every primitive.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DFracturedActorRenderBatchingTest,
+	"Box3DUnreal.FracturedActor.RenderBatching", BOX3D_TEST_FLAGS)
+bool FBox3DFracturedActorRenderBatchingTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld Test;
+	UStaticMeshComponent* Component = Box3DTest::SpawnSceneMesh(Test.World, Box3DTest::LoadCubeMesh(),
+		FTransform(FQuat::Identity, FVector(0, 0, 500), FVector(1.0, 1.0, 0.1)),
+		EComponentMobility::Movable, ECollisionEnabled::QueryAndPhysics);
+	UMaterialInterface* GridMaterial = LoadObject<UMaterialInterface>(nullptr,
+		TEXT("/Engine/EngineMaterials/WorldGridMaterial.WorldGridMaterial"));
+
+	FBox3DFractureMeshParams Params;
+	Params.Fracture.Seed = 11;
+	Params.Fracture.CellCount = 10;
+	Params.Fracture.FlattenAxis = 2;
+	Params.CoreMaterial = GridMaterial;
+	Params.bStartAsleep = true;
+	Params.bStructural = true;
+	Params.bAnchorAllFragments = true;
+	Params.MaterialToughness = 0.0f;
+	Params.bCastShadow = false;
+	Params.bAffectIndirectLighting = false;
+	Params.bReceivesDecals = false;
+	const double BuildStart = FPlatformTime::Seconds();
+	ABox3DFracturedActor* Actor = Box3D::FractureMesh(Component, Params);
+	if (!TestNotNull(TEXT("fractured actor spawned"), Actor))
+	{
+		return false;
+	}
+	AddInfo(FString::Printf(TEXT("fracture + first render build: %.2f ms for %d fragments"),
+		(FPlatformTime::Seconds() - BuildStart) * 1000.0, Actor->GetFragmentCount()));
+
+	const UStaticMeshComponent* Attached = Actor->GetAttachedMesh();
+	UStaticMesh* AttachedStaticMesh = Attached ? Attached->GetStaticMesh() : nullptr;
+	if (!TestNotNull(TEXT("attached mesh built"), AttachedStaticMesh))
+	{
+		return false;
+	}
+	TestEqual(TEXT("one build for the whole assembly"), Actor->GetRenderBuildCount(), 1);
+	TestEqual(TEXT("one primitive"), Actor->GetRenderPrimitiveCount(), 1);
+	TestEqual(TEXT("zero loose"), Actor->CountLooseFragments(), 0);
+
+	int32 ExpectedTriangles = 0;
+	for (int32 Index = 0; Index < Actor->GetFragmentCount(); ++Index)
+	{
+		TestEqual(FString::Printf(TEXT("fragment %d attached"), Index), Actor->GetFragmentRenderState(Index),
+			EBox3DFragmentRenderState::Attached);
+		TestNull(FString::Printf(TEXT("fragment %d has no component of its own"), Index), Actor->GetFragmentComponent(Index));
+		ExpectedTriangles += FragmentTriangleCount(*Actor, Index);
+	}
+	TestEqual(TEXT("attached mesh holds every fragment triangle"), MeshTriangleCount(Attached), ExpectedTriangles);
+	TArrayView<const FStaticMeshSection> Sections = MeshSections(Attached);
+	if (TestEqual(TEXT("one section per material"), Sections.Num(), 2))
+	{
+		TestEqual(TEXT("section 0 -> exterior slot"), Sections[0].MaterialIndex, 0);
+		TestEqual(TEXT("section 1 -> interior slot"), Sections[1].MaterialIndex, 1);
+	}
+	TestTrue(TEXT("exterior slot carries the source material"), Attached->GetMaterial(0) == Component->GetMaterial(0));
+	TestTrue(TEXT("interior slot carries the core material"), Attached->GetMaterial(1) == GridMaterial);
+	TestFalse(TEXT("attached mesh honours bCastShadow"), Attached->CastShadow);
+	TestFalse(TEXT("attached mesh honours bAffectIndirectLighting"), Attached->bAffectDynamicIndirectLighting);
+	TestFalse(TEXT("attached mesh honours bReceivesDecals"), Attached->bReceivesDecals);
+	TestTrue(TEXT("attached mesh has no collision"), Attached->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
+
+	// Settled: ticking builds nothing.
+	Test.Step(5);
+	Actor->SyncFragments();
+	Actor->SyncFragments();
+	TestEqual(TEXT("sync of a settled actor builds no mesh"), Actor->GetRenderBuildCount(), 1);
+
+	// Two chips come off: one attached rebuild, one chip mesh each.
+	const int32 ChipA = 0;
+	const int32 ChipB = 1;
+	TestTrue(TEXT("detach A"), Actor->DetachFragment(ChipA, FVector(0, 0, 200)));
+	TestTrue(TEXT("detach B"), Actor->DetachFragment(ChipB, FVector(0, 0, 200)));
+	TestEqual(TEXT("render changes wait for the sync"), Actor->GetRenderPrimitiveCount(), 1);
+	Actor->SyncFragments();
+	TestEqual(TEXT("attached mesh plus two chips"), Actor->GetRenderPrimitiveCount(), 3);
+	TestEqual(TEXT("two loose"), Actor->CountLooseFragments(), 2);
+	TestEqual(TEXT("one rebuild and two chip builds"), Actor->GetRenderBuildCount(), 4);
+	TestEqual(TEXT("attached mesh lost exactly the detached triangles"), MeshTriangleCount(Attached),
+		ExpectedTriangles - FragmentTriangleCount(*Actor, ChipA) - FragmentTriangleCount(*Actor, ChipB));
+	UStaticMeshComponent* ComponentA = Actor->GetFragmentComponent(ChipA);
+	if (TestNotNull(TEXT("chip A component"), ComponentA))
+	{
+		TestEqual(TEXT("chip A triangles"), MeshTriangleCount(ComponentA), FragmentTriangleCount(*Actor, ChipA));
+		TestFalse(TEXT("chip honours bCastShadow"), ComponentA->CastShadow);
+		TestFalse(TEXT("chip honours bReceivesDecals"), ComponentA->bReceivesDecals);
+		TestTrue(TEXT("chip attached to the actor"), ComponentA->GetAttachParent() == Actor->GetRootComponent());
+	}
+
+	Test.Step(20);
+	Actor->SyncFragments();
+	TestEqual(TEXT("flying chips build nothing per tick"), Actor->GetRenderBuildCount(), 4);
+	for (const int32 Chip : { ChipA, ChipB })
+	{
+		if (const UStaticMeshComponent* ChipComponent = Actor->GetFragmentComponent(Chip))
+		{
+			TestTrue(FString::Printf(TEXT("chip %d component sits on its body"), Chip),
+				ChipComponent->GetComponentLocation().Equals(Actor->GetFragmentWorldCentroid(Chip), 0.5));
+		}
+	}
+
+	// A destroyed chip frees its component; the next detach reuses it.
+	Actor->DestroyFragment(ChipA);
+	Actor->FlushRenderState();
+	TestEqual(TEXT("destroyed chip is gone from rendering"), Actor->GetRenderPrimitiveCount(), 2);
+	TestNull(TEXT("destroyed chip has no component"), Actor->GetFragmentComponent(ChipA));
+	TestEqual(TEXT("destroying a loose chip rebuilds nothing"), Actor->GetRenderBuildCount(), 4);
+	const int32 ChipC = 2;
+	TestTrue(TEXT("detach C"), Actor->DetachFragment(ChipC, FVector::ZeroVector));
+	Actor->FlushRenderState();
+	TestTrue(TEXT("chip C reuses the freed component"), Actor->GetFragmentComponent(ChipC) == ComponentA);
+	TestEqual(TEXT("chip C mesh and one attached rebuild"), Actor->GetRenderBuildCount(), 6);
+	TestEqual(TEXT("attached mesh plus B and C"), Actor->GetRenderPrimitiveCount(), 3);
 	return true;
 }
 

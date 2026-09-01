@@ -19,6 +19,8 @@ public class Box3DRuntime : ModuleRules
 			"DeveloperSettings",
 			"PhysicsCore",
 			"ProceduralMeshComponent",
+			"MeshDescription",
+			"StaticMeshDescription",
 			"Niagara",
 			"RenderCore",
 			"RHI",

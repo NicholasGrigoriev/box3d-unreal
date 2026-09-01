@@ -8,7 +8,8 @@
 
 #include "Box3DDestructibleComponent.h"
 #include "Box3DFracturedActor.h"
-#include "ProceduralMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "Tests/Box3DTestHelpers.h"
 #include "box3d/box3d.h"
 
@@ -164,16 +165,17 @@ bool FBox3DDestructionClientVisualEventTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("all event fragments retained"), Actor->GetFragmentCount(), ExpectedFragments.Num());
 	TestEqual(TEXT("visual-only actor creates no welds"), Actor->GetLiveWeldCount(), 0);
 
-	int32 VisibleSectionCount = 0;
+	int32 AttachedCount = 0;
 	bool bAnyBody = false;
 	for (int32 FragmentIndex = 0; FragmentIndex < Actor->GetFragmentCount(); ++FragmentIndex)
 	{
-		const FIntPoint Sections = Actor->GetFragmentSections(FragmentIndex);
-		VisibleSectionCount += Sections.X != INDEX_NONE ? 1 : 0;
-		VisibleSectionCount += Sections.Y != INDEX_NONE ? 1 : 0;
+		AttachedCount += Actor->GetFragmentRenderState(FragmentIndex) == EBox3DFragmentRenderState::Attached ? 1 : 0;
 		bAnyBody |= b3Body_IsValid(Actor->GetFragmentBody(FragmentIndex));
 	}
-	TestTrue(TEXT("PMC visual sections were built"), VisibleSectionCount > 0);
+	TestTrue(TEXT("visual fragments baked into the attached mesh"), AttachedCount > 0);
+	UStaticMesh* AttachedStaticMesh = Actor->GetAttachedMesh()->GetStaticMesh();
+	TestNotNull(TEXT("attached mesh built"), AttachedStaticMesh);
+	TestEqual(TEXT("visual-only actor is one primitive"), Actor->GetRenderPrimitiveCount(), 1);
 	TestFalse(TEXT("visual fragment set has no b3 bodies"), bAnyBody);
 	TestFalse(TEXT("received event swaps out intact source"), Mesh->IsVisible());
 	return true;

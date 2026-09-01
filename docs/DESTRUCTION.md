@@ -62,9 +62,9 @@ volume, centroid, faces, and symmetric shared-face adjacency. Use
 
 `Box3D::FractureConvexProxy` fractures a bare convex proxy at a given pose with no
 source component (callers that render their own cladding). `Box3D::FractureMesh` is the authority-only actor handoff. It resolves the source
-proxy, creates an `ABox3DFracturedActor`, emits exterior/interior procedural mesh
-sections, hides the intact source mesh, disables its Chaos collision, and removes
-its static-mirror body. Body-tier fragments receive Box3D hulls; adjacent cells
+proxy, creates an `ABox3DFracturedActor`, bakes the fragments into its render
+meshes (see Rendering below), hides the intact source mesh, disables its Chaos
+collision, and removes its static-mirror body. Body-tier fragments receive Box3D hulls; adjacent cells
 receive welds with:
 
 ```
@@ -150,8 +150,9 @@ ABox3DFracturedActor* Fractured = Destructible->ApplyDestructionEvent(
 `ApplyDestructionEvent` rejects a target whose local mesh asset path differs from
 `MeshId`. On simulation authority it creates Box3D bodies, welds, and structural
 state. On non-authority or no-world clients it uses
-`Box3D::RegenerateFractureVisuals`: identical procedural mesh sections and tier
-data, but no Box3D bodies, welds, structure solver, or fragment-pool entry.
+`Box3D::RegenerateFractureVisuals`: identical render geometry (every fragment in
+the attached mesh) and tier data, but no Box3D bodies, welds, structure solver,
+or fragment-pool entry.
 
 Set `bAuthorityOnlySimulation` when pure clients should have no Box3D world.
 Standalone, listen-server, and dedicated-server worlds remain authorities;
@@ -187,6 +188,41 @@ the present. Important limits:
   rollback is not guaranteed bit-identical to uninterrupted simulation;
 - `PositionTolerance` is in Box3D metres (`0.02` by default, or 2 cm).
 
+## Rendering
+
+`ABox3DFracturedActor` draws with static meshes built at runtime
+(`UStaticMesh::BuildFromMeshDescriptions`, fast path — the same call packaged
+builds use) and never rewrites vertices per frame:
+
+- **Attached** fragments (static bodies — anchored cladding, an unbroken
+  structural assembly — and every fragment on the visual-only client path) are
+  baked into ONE mesh on the `AttachedFragments` component: section 0 = exterior
+  faces with the source material, section 1 = interior cut faces with
+  `CoreMaterial`. However many pieces a settled ruin has, it is one
+  static-relevance primitive with cached draw commands.
+- **Loose** fragments (dynamic bodies: `DetachFragment`, structural promotion,
+  plain rubble) each get a pooled `UStaticMeshComponent` carrying that fragment's
+  body-local geometry; `SyncFragments` (Tick) moves awake ones with
+  `SetWorldLocationAndRotation` — a GPU-scene transform update, no buffer churn.
+  `GetFragmentRenderState` / `GetFragmentComponent` / `GetAttachedMesh` expose
+  the split; `GetRenderPrimitiveCount` is attached mesh + loose chips.
+- Render changes coalesce: `DetachFragment`, `DestroyFragment` and promotions only
+  mark the actor dirty; the next `SyncFragments` (or a next-tick timer for a
+  non-ticking actor, or an explicit `FlushRenderState`) moves fragments between
+  the two forms and rebuilds the attached mesh once. `GetRenderBuildCount` counts
+  mesh builds; a settled actor must not grow it from Tick
+  (`FracturedActor.RenderBatching` asserts all of this).
+- `FBox3DFractureMeshParams::bCastShadow / bAffectIndirectLighting /
+  bReceivesDecals` reach every fragment primitive.
+- `ApplyVertexDent` edits the stored body-local geometry and rebuilds only the
+  meshes it touched.
+
+Why: a procedural mesh section is dynamic relevance — a mesh batch rebuilt per
+pass per frame plus a one-frame uniform buffer — and `UpdateMeshSection` is a
+staging upload (plus a BLAS rebuild under ray tracing) per chip per frame. With
+~140 cracked cladding cells that was 2,840 batches and 31 ms looking at the wall
+vs 11 ms looking away (ArcShooter `docs/destructible-skin.md`, profiling notes).
+
 ## Fragment tiers and budgets
 
 `FBox3DTierThresholds` classifies each fragment by volume in cm³:
@@ -194,8 +230,8 @@ the present. Important limits:
 | Tier | Rule | Runtime result |
 | --- | --- | --- |
 | Dust | below `RenderVolumeThreshold` | dropped completely |
-| Debris | not Dust, below `PhysicsVolumeThreshold` | no section/body/weld; added to burst arrays |
-| Body | otherwise | procedural sections, hull body, and eligible welds |
+| Debris | not Dust, below `PhysicsVolumeThreshold` | not drawn, no body/weld; added to burst arrays |
+| Body | otherwise | drawn, hull body, and eligible welds |
 
 Dust is tested first and therefore wins when thresholds overlap. Zero thresholds
 keep every fragment in Body tier.

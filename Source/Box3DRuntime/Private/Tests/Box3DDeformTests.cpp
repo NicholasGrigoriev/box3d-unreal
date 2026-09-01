@@ -12,7 +12,8 @@
 #include "Engine/TextureRenderTarget2D.h"
 #include "HAL/IConsoleManager.h"
 #include "Materials/MaterialInstanceDynamic.h"
-#include "ProceduralMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "Tests/Box3DTestHelpers.h"
 
 namespace
@@ -170,37 +171,47 @@ bool FBox3DFracturedActorVertexDentTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	int32 SectionIndex = INDEX_NONE;
-	for (int32 FragmentIndex = 0; FragmentIndex < Actor->GetFragmentCount() && SectionIndex == INDEX_NONE;
-		++FragmentIndex)
+	int32 FragmentIndex = INDEX_NONE;
+	for (int32 Index = 0; Index < Actor->GetFragmentCount() && FragmentIndex == INDEX_NONE; ++Index)
 	{
-		const FIntPoint Sections = Actor->GetFragmentSections(FragmentIndex);
-		SectionIndex = Sections.X != INDEX_NONE ? Sections.X : Sections.Y;
+		if (Actor->GetFragmentRenderState(Index) != EBox3DFragmentRenderState::None)
+		{
+			FragmentIndex = Index;
+		}
 	}
-	FProcMeshSection* Section = Actor->GetMesh()->GetProcMeshSection(SectionIndex);
-	if (!TestNotNull(TEXT("actor has render geometry"), Section) || Section->ProcVertexBuffer.IsEmpty())
+	const TArray<FVector>* Vertices = Actor->GetFragmentRenderVertices(FragmentIndex);
+	if (!TestNotNull(TEXT("actor has render geometry"), Vertices) || Vertices->IsEmpty())
 	{
 		return false;
 	}
-
-	const FVector Before(Section->ProcVertexBuffer[0].Position);
+	// Asleep dynamic rubble: the fragment draws through its own component, still
+	// at the spawn pose, so body-local + centroid is actor space.
+	UStaticMeshComponent* Chip = Actor->GetFragmentComponent(FragmentIndex);
+	if (!TestNotNull(TEXT("fragment draws through its own component"), Chip))
+	{
+		return false;
+	}
+	UStaticMesh* MeshBefore = Chip->GetStaticMesh();
+	const FVector Before = (*Vertices)[0];
+	const FVector Centroid = Actor->GetFragments()[FragmentIndex].Centroid;
 	const uint32 CollisionGeometryHash = Box3D::Fracture::FractureLayoutHash(Actor->GetFragments());
-	TestFalse(TEXT("fragment section starts without PMC collision"), Section->bEnableCollision);
+	TestTrue(TEXT("fragment primitive starts without collision"), Chip->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
 
-	const FVector WorldImpact = Actor->GetActorTransform().TransformPosition(Before);
+	const FVector WorldImpact = Actor->GetActorTransform().TransformPosition(Before + Centroid);
 	const FVector WorldNormal = Actor->GetActorTransform().TransformVectorNoScale(FVector::UpVector);
 	TestTrue(TEXT("dent displaces at least the struck render vertex"),
 		Actor->ApplyVertexDent(WorldImpact, WorldNormal, 0.25f, 3.0f, 0.0f) > 0);
 
-	Section = Actor->GetMesh()->GetProcMeshSection(SectionIndex);
-	if (!TestNotNull(TEXT("section remains available after update"), Section))
+	Vertices = Actor->GetFragmentRenderVertices(FragmentIndex);
+	if (!TestNotNull(TEXT("render geometry remains available after update"), Vertices))
 	{
 		return false;
 	}
-	const FVector After(Section->ProcVertexBuffer[0].Position);
+	const FVector After = (*Vertices)[0];
 	TestTrue(TEXT("struck vertex moves inward by the clamped depth"),
 		After.Equals(Before - FVector::UpVector * 3.0, 1.0e-4));
-	TestFalse(TEXT("render update does not enable PMC collision"), Section->bEnableCollision);
+	TestTrue(TEXT("dent rebuilt the chip mesh"), Chip->GetStaticMesh() != nullptr && Chip->GetStaticMesh() != MeshBefore);
+	TestTrue(TEXT("render update leaves collision off"), Chip->GetCollisionEnabled() == ECollisionEnabled::NoCollision);
 	TestEqual(TEXT("render dent leaves fragment hull source geometry untouched"),
 		Box3D::Fracture::FractureLayoutHash(Actor->GetFragments()), CollisionGeometryHash);
 	return true;

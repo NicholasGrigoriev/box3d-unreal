@@ -8,22 +8,40 @@
 #include "Box3DSettings.h"
 #include "Box3DStaticSceneMirror.h"
 #include "Box3DWorldSubsystem.h"
+#include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "Materials/MaterialInterface.h"
+#include "MeshDescription.h"
 #include "NiagaraComponent.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraSystem.h"
 #include "PhysicsEngine/BodySetup.h"
-#include "ProceduralMeshComponent.h"
+#include "StaticMeshAttributes.h"
+#include "TimerManager.h"
 #include "box3d/box3d.h"
 #include "box3d/collision.h"
 
 namespace
 {
 	using namespace Box3D::Fracture;
+
+	/// Material slot names of every fragment static mesh; sections resolve their
+	/// material index by these.
+	const FName ExteriorSlotName(TEXT("Exterior"));
+	const FName InteriorSlotName(TEXT("Interior"));
+
+	/// Fragment primitives never collide (the b3 hulls do) and never move by
+	/// physics of their own.
+	void ConfigureFragmentComponent(UStaticMeshComponent& Component)
+	{
+		Component.SetMobility(EComponentMobility::Movable);
+		Component.SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Component.SetGenerateOverlapEvents(false);
+		Component.SetCanEverAffectNavigation(false);
+	}
 
 	/// Convex hull of a cm point cloud as a fracture proxy, faces wound CCW seen
 	/// from outside (the b3 half-edge convention matches the proxy convention).
@@ -148,139 +166,139 @@ namespace
 			}
 		}
 	}
-
-	/// Geometry buffers for one PMC section, filled face by face. Faces stay
-	/// flat-shaded: vertices are duplicated per face with the face normal.
-	struct FSectionBatch
-	{
-		TArray<FVector> Vertices;
-		TArray<FVector> Normals;
-		TArray<FVector2D> UVs;
-		TArray<int32> Triangles;
-
-		void AddFace(const FBox3DFragmentData& Fragment, const FBox3DFragmentFace& Face)
-		{
-			const TArray<int32>& Loop = Face.VertexIndices;
-			if (Loop.Num() < 3)
-			{
-				return;
-			}
-
-			// Newell normal: outward for loops wound CCW seen from outside.
-			FVector Normal = FVector::ZeroVector;
-			for (int32 Index = 0; Index < Loop.Num(); ++Index)
-			{
-				const FVector& A = Fragment.Vertices[Loop[Index]];
-				const FVector& B = Fragment.Vertices[Loop[(Index + 1) % Loop.Num()]];
-				Normal += FVector::CrossProduct(A, B);
-			}
-			Normal = Normal.GetSafeNormal(UE_SMALL_NUMBER, FVector::UpVector);
-
-			// Planar UVs along the dominant normal axis, tiled per meter.
-			int32 AxisU = 0;
-			int32 AxisV = 1;
-			const FVector AbsNormal = Normal.GetAbs();
-			if (AbsNormal.X >= AbsNormal.Y && AbsNormal.X >= AbsNormal.Z)
-			{
-				AxisU = 1;
-				AxisV = 2;
-			}
-			else if (AbsNormal.Y >= AbsNormal.Z)
-			{
-				AxisU = 0;
-				AxisV = 2;
-			}
-
-			const int32 Base = Vertices.Num();
-			for (const int32 VertexIndex : Loop)
-			{
-				const FVector& Position = Fragment.Vertices[VertexIndex];
-				Vertices.Add(Position);
-				Normals.Add(Normal);
-				UVs.Emplace(Position[AxisU] / 100.0, Position[AxisV] / 100.0);
-			}
-
-			// Fragment faces wind CCW from outside (the b3 convention); UE renders
-			// the reverse (see the cooking index flip), so the fan is emitted flipped.
-			for (int32 Index = 1; Index + 1 < Loop.Num(); ++Index)
-			{
-				Triangles.Append({ Base, Base + Index + 1, Base + Index });
-			}
-		}
-	};
 }
 
 ABox3DFracturedActor::ABox3DFracturedActor()
 {
 	PrimaryActorTick.bCanEverTick = true;
 
-	Mesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("FracturedMesh"));
-	Mesh->SetMobility(EComponentMobility::Movable);
-	Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	SetRootComponent(Mesh);
+	FractureRoot = CreateDefaultSubobject<USceneComponent>(TEXT("FractureRoot"));
+	FractureRoot->SetMobility(EComponentMobility::Movable);
+	SetRootComponent(FractureRoot);
+
+	AttachedMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("AttachedFragments"));
+	AttachedMesh->SetupAttachment(FractureRoot);
+	ConfigureFragmentComponent(*AttachedMesh);
+}
+
+void ABox3DFracturedActor::BuildRenderGeometry(const FBox3DFragmentData& Fragment, FFragmentRenderGeometry& Out)
+{
+	Out = FFragmentRenderGeometry();
+	int32 CornerCount = 0;
+	for (const FBox3DFragmentFace& Face : Fragment.Faces)
+	{
+		CornerCount += Face.VertexIndices.Num() >= 3 ? Face.VertexIndices.Num() : 0;
+	}
+	Out.Vertices.Reserve(CornerCount);
+	Out.Normals.Reserve(CornerCount);
+	Out.Tangents.Reserve(CornerCount);
+	Out.BinormalSigns.Reserve(CornerCount);
+	Out.UVs.Reserve(CornerCount);
+
+	for (const FBox3DFragmentFace& Face : Fragment.Faces)
+	{
+		const TArray<int32>& Loop = Face.VertexIndices;
+		if (Loop.Num() < 3)
+		{
+			continue;
+		}
+
+		// Newell normal: outward for loops wound CCW seen from outside.
+		FVector Normal = FVector::ZeroVector;
+		for (int32 Index = 0; Index < Loop.Num(); ++Index)
+		{
+			const FVector& A = Fragment.Vertices[Loop[Index]];
+			const FVector& B = Fragment.Vertices[Loop[(Index + 1) % Loop.Num()]];
+			Normal += FVector::CrossProduct(A, B);
+		}
+		Normal = Normal.GetSafeNormal(UE_SMALL_NUMBER, FVector::UpVector);
+
+		// Planar UVs along the dominant normal axis, tiled per meter; the tangent
+		// frame follows the same two axes so normal maps read the UV gradient.
+		int32 AxisU = 0;
+		int32 AxisV = 1;
+		const FVector AbsNormal = Normal.GetAbs();
+		if (AbsNormal.X >= AbsNormal.Y && AbsNormal.X >= AbsNormal.Z)
+		{
+			AxisU = 1;
+			AxisV = 2;
+		}
+		else if (AbsNormal.Y >= AbsNormal.Z)
+		{
+			AxisU = 0;
+			AxisV = 2;
+		}
+		FVector AxisUDir = FVector::ZeroVector;
+		AxisUDir[AxisU] = 1.0;
+		FVector AxisVDir = FVector::ZeroVector;
+		AxisVDir[AxisV] = 1.0;
+		const FVector Tangent =
+			(AxisUDir - Normal * FVector::DotProduct(Normal, AxisUDir)).GetSafeNormal(UE_SMALL_NUMBER, AxisUDir);
+		const float BinormalSign =
+			FVector::DotProduct(FVector::CrossProduct(Normal, Tangent), AxisVDir) >= 0.0 ? 1.0f : -1.0f;
+
+		const int32 Base = Out.Vertices.Num();
+		for (const int32 VertexIndex : Loop)
+		{
+			const FVector& Position = Fragment.Vertices[VertexIndex];
+			Out.Vertices.Add(Position - Fragment.Centroid);
+			Out.Normals.Add(Normal);
+			Out.Tangents.Add(Tangent);
+			Out.BinormalSigns.Add(BinormalSign);
+			Out.UVs.Emplace(Position[AxisU] / 100.0, Position[AxisV] / 100.0);
+		}
+
+		// Fragment faces wind CCW from outside (the b3 convention); UE renders
+		// the reverse (see the cooking index flip), so the fan is emitted flipped.
+		TArray<int32>& Triangles = Face.NeighborIndex == INDEX_NONE ? Out.ExteriorTriangles : Out.InteriorTriangles;
+		for (int32 Index = 1; Index + 1 < Loop.Num(); ++Index)
+		{
+			Triangles.Append({ Base, Base + Index + 1, Base + Index });
+		}
+	}
 }
 
 void ABox3DFracturedActor::InitializeFragments(TArray<FBox3DFragmentData>&& InFragments,
 	UMaterialInterface* SourceMaterial, bool bCreatePhysics)
 {
 	DestroyFragmentPhysics();
-	SectionGeometry.Reset();
+	for (int32 Index = 0; Index < FragmentComponents.Num(); ++Index)
+	{
+		ReleaseFragmentComponent(Index);
+	}
 
 	Fragments = MoveTemp(InFragments);
 	Box3D::Destruction::ClassifyFragmentTiers(Fragments, TierThresholds, FragmentTiers);
 	Box3D::Destruction::BuildDebrisBurst(Fragments, FragmentTiers, DebrisImpactPoint, DebrisSpeed, DebrisBurst);
 	SpawnDebrisBurst();
-	FragmentSections.Init(FIntPoint(INDEX_NONE, INDEX_NONE), Fragments.Num());
-	Mesh->ClearAllMeshSections();
 
-	UMaterialInterface* InteriorMaterial = CoreMaterial != nullptr ? CoreMaterial.Get() : SourceMaterial;
-	int32 SectionIndex = 0;
-
-	for (int32 FragmentIndex = 0; FragmentIndex < Fragments.Num(); ++FragmentIndex)
+	ExteriorMaterial = SourceMaterial;
+	RenderGeometry.SetNum(Fragments.Num());
+	for (int32 Index = 0; Index < Fragments.Num(); ++Index)
 	{
-		if (FragmentTiers[FragmentIndex] != EBox3DFragmentTier::Body)
+		if (FragmentTiers[Index] == EBox3DFragmentTier::Body)
 		{
-			continue;
+			BuildRenderGeometry(Fragments[Index], RenderGeometry[Index]);
 		}
-		const FBox3DFragmentData& Fragment = Fragments[FragmentIndex];
-		FSectionBatch Exterior;
-		FSectionBatch Interior;
-		for (const FBox3DFragmentFace& Face : Fragment.Faces)
-		{
-			(Face.NeighborIndex == INDEX_NONE ? Exterior : Interior).AddFace(Fragment, Face);
-		}
-
-		const auto CreateSection = [&](const FSectionBatch& Batch, UMaterialInterface* Material) -> int32
-		{
-			if (Batch.Triangles.IsEmpty())
-			{
-				return INDEX_NONE;
-			}
-			Mesh->CreateMeshSection_LinearColor(SectionIndex, Batch.Vertices, Batch.Triangles, Batch.Normals,
-				Batch.UVs, TArray<FLinearColor>(), TArray<FProcMeshTangent>(), /*bCreateCollision*/ false);
-			Mesh->SetMaterial(SectionIndex, Material);
-
-			FSectionGeometry& Geometry = SectionGeometry.AddDefaulted_GetRef();
-			Geometry.SectionIndex = SectionIndex;
-			Geometry.FragmentIndex = FragmentIndex;
-			Geometry.LocalVertices.Reserve(Batch.Vertices.Num());
-			for (const FVector& Vertex : Batch.Vertices)
-			{
-				Geometry.LocalVertices.Add(Vertex - Fragment.Centroid);
-			}
-			Geometry.LocalNormals = Batch.Normals;
-			return SectionIndex++;
-		};
-
-		FragmentSections[FragmentIndex].X = CreateSection(Exterior, SourceMaterial);
-		FragmentSections[FragmentIndex].Y = CreateSection(Interior, InteriorMaterial);
 	}
+	FragmentComponents.Init(nullptr, Fragments.Num());
+	FragmentRenderStates.Init(EBox3DFragmentRenderState::None, Fragments.Num());
+	FragmentDestroyed.Init(false, Fragments.Num());
+	ApplyRenderFlags(*AttachedMesh);
 
 	if (bCreatePhysics)
 	{
 		BuildFragmentPhysics();
 		InitializeStructure();
+	}
 
+	// Draw after the physics setup: body types decide which fragments share the
+	// attached mesh (anchored cladding: all of them; plain rubble: none).
+	bRenderDirty = true;
+	FlushRenderState();
+
+	if (bCreatePhysics)
+	{
 		// Join the fragment pool last: registration may evict older fractured actors
 		// to make room, and this actor's own footprint must be final by then.
 		if (UBox3DWorldSubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UBox3DWorldSubsystem>() : nullptr)
@@ -288,6 +306,283 @@ void ABox3DFracturedActor::InitializeFragments(TArray<FBox3DFragmentData>&& InFr
 			Subsystem->RegisterFracturedActor(this);
 		}
 	}
+}
+
+EBox3DFragmentRenderState ABox3DFracturedActor::DesiredRenderState(int32 FragmentIndex) const
+{
+	if (!Fragments.IsValidIndex(FragmentIndex) || GetFragmentTier(FragmentIndex) != EBox3DFragmentTier::Body
+		|| (FragmentDestroyed.IsValidIndex(FragmentIndex) && FragmentDestroyed[FragmentIndex])
+		|| !RenderGeometry.IsValidIndex(FragmentIndex) || RenderGeometry[FragmentIndex].Vertices.IsEmpty())
+	{
+		return EBox3DFragmentRenderState::None;
+	}
+	if (IsFragmentAlive(FragmentIndex) && b3Body_GetType(FragmentBodies[FragmentIndex]) == b3_dynamicBody)
+	{
+		return EBox3DFragmentRenderState::Loose;
+	}
+	return EBox3DFragmentRenderState::Attached;
+}
+
+void ABox3DFracturedActor::MarkRenderDirty()
+{
+	bRenderDirty = true;
+	UWorld* World = GetWorld();
+	if (World == nullptr || IsActorBeingDestroyed())
+	{
+		return;
+	}
+	// Tick normally flushes first; the timer covers actors that do not tick (a
+	// skin stops ticking settled cells, yet still destroys their expired chips).
+	FTimerManager& Timers = World->GetTimerManager();
+	if (!Timers.IsTimerActive(RenderFlushTimer))
+	{
+		RenderFlushTimer = Timers.SetTimerForNextTick(this, &ABox3DFracturedActor::FlushRenderState);
+	}
+}
+
+void ABox3DFracturedActor::FlushRenderState()
+{
+	if (!bRenderDirty || IsActorBeingDestroyed() || AttachedMesh == nullptr)
+	{
+		return;
+	}
+	bRenderDirty = false;
+
+	bool bAttachedChanged = false;
+	for (int32 Index = 0; Index < Fragments.Num(); ++Index)
+	{
+		const EBox3DFragmentRenderState Desired = DesiredRenderState(Index);
+		const EBox3DFragmentRenderState Current = FragmentRenderStates[Index];
+		if (Desired == Current)
+		{
+			continue;
+		}
+		bAttachedChanged |= Current == EBox3DFragmentRenderState::Attached || Desired == EBox3DFragmentRenderState::Attached;
+		if (Current == EBox3DFragmentRenderState::Loose)
+		{
+			ReleaseFragmentComponent(Index);
+		}
+		FragmentRenderStates[Index] = Desired;
+		if (Desired == EBox3DFragmentRenderState::Loose)
+		{
+			MakeFragmentLoose(Index);
+		}
+	}
+	if (bAttachedChanged)
+	{
+		RebuildAttachedMesh();
+	}
+}
+
+void ABox3DFracturedActor::RebuildAttachedMesh()
+{
+	TArray<int32> Attached;
+	Attached.Reserve(Fragments.Num());
+	for (int32 Index = 0; Index < FragmentRenderStates.Num(); ++Index)
+	{
+		if (FragmentRenderStates[Index] == EBox3DFragmentRenderState::Attached)
+		{
+			Attached.Add(Index);
+		}
+	}
+	// Always a fresh mesh: rebuilding one in place waits on the render thread to
+	// release its buffers, swapping just recreates this component's proxy.
+	AttachedMesh->SetStaticMesh(Attached.IsEmpty() ? nullptr : BuildStaticMesh(Attached, /*bCentroidRelative*/ false));
+}
+
+void ABox3DFracturedActor::MakeFragmentLoose(int32 FragmentIndex)
+{
+	UStaticMesh* ChipMesh = BuildStaticMesh(MakeArrayView(&FragmentIndex, 1), /*bCentroidRelative*/ true);
+	if (ChipMesh == nullptr)
+	{
+		FragmentRenderStates[FragmentIndex] = EBox3DFragmentRenderState::None;
+		return;
+	}
+	UStaticMeshComponent* Component = AcquireFragmentComponent();
+	Component->SetStaticMesh(ChipMesh);
+	FragmentComponents[FragmentIndex] = Component;
+	SyncFragmentComponent(FragmentIndex);
+}
+
+UStaticMeshComponent* ABox3DFracturedActor::AcquireFragmentComponent()
+{
+	UStaticMeshComponent* Component = nullptr;
+	while (Component == nullptr && !FreeFragmentComponents.IsEmpty())
+	{
+		Component = FreeFragmentComponents.Pop();
+		if (!IsValid(Component))
+		{
+			Component = nullptr;
+		}
+	}
+	if (Component == nullptr)
+	{
+		Component = NewObject<UStaticMeshComponent>(this, NAME_None, RF_Transient);
+		ConfigureFragmentComponent(*Component);
+		ApplyRenderFlags(*Component);
+		Component->SetupAttachment(FractureRoot);
+		Component->RegisterComponent();
+	}
+	Component->SetVisibility(true);
+	return Component;
+}
+
+void ABox3DFracturedActor::ReleaseFragmentComponent(int32 FragmentIndex)
+{
+	if (!FragmentComponents.IsValidIndex(FragmentIndex))
+	{
+		return;
+	}
+	UStaticMeshComponent* Component = FragmentComponents[FragmentIndex];
+	FragmentComponents[FragmentIndex] = nullptr;
+	if (Component == nullptr)
+	{
+		return;
+	}
+	Component->SetStaticMesh(nullptr);
+	Component->SetVisibility(false);
+	FreeFragmentComponents.Add(Component);
+}
+
+void ABox3DFracturedActor::ApplyRenderFlags(UPrimitiveComponent& Component) const
+{
+	Component.SetCastShadow(bFragmentsCastShadow);
+	Component.bAffectDynamicIndirectLighting = bFragmentsAffectIndirectLighting;
+	Component.bAffectDistanceFieldLighting = bFragmentsAffectIndirectLighting;
+	Component.SetReceivesDecals(bFragmentsReceiveDecals);
+	Component.MarkRenderStateDirty();
+}
+
+void ABox3DFracturedActor::SyncFragmentComponent(int32 FragmentIndex) const
+{
+	UStaticMeshComponent* Component = FragmentComponents.IsValidIndex(FragmentIndex) ? FragmentComponents[FragmentIndex].Get() : nullptr;
+	if (Component == nullptr)
+	{
+		return;
+	}
+	const b3BodyId Body = GetFragmentBody(FragmentIndex);
+	if (b3Body_IsValid(Body))
+	{
+		// Chip geometry is body-local (centroid origin, spawn rotation), so the
+		// body pose is the component's world transform.
+		const b3WorldTransform Transform = b3Body_GetTransform(Body);
+		Component->SetWorldLocationAndRotation(Box3D::ToUEPos(Transform.p), Box3D::ToUE(Transform.q));
+	}
+	else
+	{
+		Component->SetWorldLocationAndRotation(
+			GetActorTransform().TransformPosition(Fragments[FragmentIndex].Centroid), GetActorQuat());
+	}
+}
+
+UStaticMesh* ABox3DFracturedActor::BuildStaticMesh(TArrayView<const int32> FragmentIndices, bool bCentroidRelative)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Box3DFracturedActor_BuildStaticMesh);
+
+	int32 CornerTotal = 0;
+	int32 TriangleTotal = 0;
+	for (const int32 FragmentIndex : FragmentIndices)
+	{
+		const FFragmentRenderGeometry& Geometry = RenderGeometry[FragmentIndex];
+		CornerTotal += Geometry.Vertices.Num();
+		TriangleTotal += (Geometry.ExteriorTriangles.Num() + Geometry.InteriorTriangles.Num()) / 3;
+	}
+	if (TriangleTotal == 0)
+	{
+		return nullptr;
+	}
+
+	FMeshDescription MeshDescription;
+	FStaticMeshAttributes Attributes(MeshDescription);
+	Attributes.Register();
+	TVertexAttributesRef<FVector3f> Positions = Attributes.GetVertexPositions();
+	TVertexInstanceAttributesRef<FVector3f> Normals = Attributes.GetVertexInstanceNormals();
+	TVertexInstanceAttributesRef<FVector3f> Tangents = Attributes.GetVertexInstanceTangents();
+	TVertexInstanceAttributesRef<float> BinormalSigns = Attributes.GetVertexInstanceBinormalSigns();
+	TVertexInstanceAttributesRef<FVector2f> UVs = Attributes.GetVertexInstanceUVs();
+	UVs.SetNumChannels(1);
+	TPolygonGroupAttributesRef<FName> SlotNames = Attributes.GetPolygonGroupMaterialSlotNames();
+
+	// Two groups always, in slot order; the build drops the empty one.
+	const FPolygonGroupID ExteriorGroup = MeshDescription.CreatePolygonGroup();
+	SlotNames[ExteriorGroup] = ExteriorSlotName;
+	const FPolygonGroupID InteriorGroup = MeshDescription.CreatePolygonGroup();
+	SlotNames[InteriorGroup] = InteriorSlotName;
+
+	MeshDescription.ReserveNewVertices(CornerTotal);
+	MeshDescription.ReserveNewVertexInstances(CornerTotal);
+	MeshDescription.ReserveNewTriangles(TriangleTotal);
+	MeshDescription.ReserveNewEdges(TriangleTotal * 3);
+
+	TArray<FVertexInstanceID> Instances;
+	for (const int32 FragmentIndex : FragmentIndices)
+	{
+		const FFragmentRenderGeometry& Geometry = RenderGeometry[FragmentIndex];
+		const FVector Offset = bCentroidRelative ? FVector::ZeroVector : Fragments[FragmentIndex].Centroid;
+		Instances.Reset(Geometry.Vertices.Num());
+		for (int32 Corner = 0; Corner < Geometry.Vertices.Num(); ++Corner)
+		{
+			const FVertexID Vertex = MeshDescription.CreateVertex();
+			Positions[Vertex] = FVector3f(Geometry.Vertices[Corner] + Offset);
+			const FVertexInstanceID Instance = MeshDescription.CreateVertexInstance(Vertex);
+			Normals[Instance] = FVector3f(Geometry.Normals[Corner]);
+			Tangents[Instance] = FVector3f(Geometry.Tangents[Corner]);
+			BinormalSigns[Instance] = Geometry.BinormalSigns[Corner];
+			UVs.Set(Instance, 0, FVector2f(Geometry.UVs[Corner]));
+			Instances.Add(Instance);
+		}
+		const auto AddTriangles = [&](const TArray<int32>& Triangles, FPolygonGroupID Group)
+		{
+			for (int32 Index = 0; Index + 2 < Triangles.Num(); Index += 3)
+			{
+				const FVertexInstanceID Triangle[3] = {
+					Instances[Triangles[Index]], Instances[Triangles[Index + 1]], Instances[Triangles[Index + 2]] };
+				MeshDescription.CreateTriangle(Group, Triangle);
+			}
+		};
+		AddTriangles(Geometry.ExteriorTriangles, ExteriorGroup);
+		AddTriangles(Geometry.InteriorTriangles, InteriorGroup);
+	}
+
+	UStaticMesh* StaticMesh = NewObject<UStaticMesh>(this, NAME_None, RF_Transient);
+	UMaterialInterface* InteriorMaterial = CoreMaterial != nullptr ? CoreMaterial.Get() : ExteriorMaterial.Get();
+	StaticMesh->GetStaticMaterials().Add(FStaticMaterial(ExteriorMaterial, ExteriorSlotName));
+	StaticMesh->GetStaticMaterials().Add(FStaticMaterial(InteriorMaterial, InteriorSlotName));
+
+	// The fast path builds render data straight from the description — no
+	// source model, no DDC — which is also the only path available in packaged
+	// builds.
+	UStaticMesh::FBuildMeshDescriptionsParams BuildParams;
+	BuildParams.bFastBuild = true;
+	BuildParams.bCommitMeshDescription = false;
+	BuildParams.bMarkPackageDirty = false;
+	BuildParams.bBuildSimpleCollision = false;
+	StaticMesh->BuildFromMeshDescriptions({ &MeshDescription }, BuildParams);
+	++RenderBuildCount;
+	return StaticMesh;
+}
+
+int32 ABox3DFracturedActor::CountLooseFragments() const
+{
+	int32 Count = 0;
+	for (const EBox3DFragmentRenderState State : FragmentRenderStates)
+	{
+		Count += State == EBox3DFragmentRenderState::Loose ? 1 : 0;
+	}
+	return Count;
+}
+
+int32 ABox3DFracturedActor::GetRenderPrimitiveCount() const
+{
+	return (AttachedMesh != nullptr && AttachedMesh->GetStaticMesh() != nullptr ? 1 : 0) + CountLooseFragments();
+}
+
+const TArray<FVector>* ABox3DFracturedActor::GetFragmentRenderVertices(int32 FragmentIndex) const
+{
+	return RenderGeometry.IsValidIndex(FragmentIndex)
+			&& GetFragmentRenderState(FragmentIndex) != EBox3DFragmentRenderState::None
+		? &RenderGeometry[FragmentIndex].Vertices
+		: nullptr;
 }
 
 void ABox3DFracturedActor::SpawnDebrisBurst() const
@@ -753,6 +1048,10 @@ void ABox3DFracturedActor::ProcessPromotions()
 	{
 		b3Body_SetAwake(Body, true);
 	}
+	if (!Promoted.IsEmpty())
+	{
+		MarkRenderDirty();
+	}
 }
 
 void ABox3DFracturedActor::DestroyFragment(int32 FragmentIndex)
@@ -762,11 +1061,11 @@ void ABox3DFracturedActor::DestroyFragment(int32 FragmentIndex)
 		return;
 	}
 	// A detached chip is already gone from the structure graph but still has a
-	// body and sections, so "already destroyed" is judged on those, not the graph.
+	// body and is drawn, so "already destroyed" is judged on those, not the graph.
 	const bool bHasBody = FragmentBodies.IsValidIndex(FragmentIndex) && b3Body_IsValid(FragmentBodies[FragmentIndex]);
-	const bool bHasSections = FragmentSections.IsValidIndex(FragmentIndex)
-		&& (FragmentSections[FragmentIndex].X != INDEX_NONE || FragmentSections[FragmentIndex].Y != INDEX_NONE);
-	if (!bHasBody && !bHasSections)
+	const bool bDrawn = FragmentDestroyed.IsValidIndex(FragmentIndex) && !FragmentDestroyed[FragmentIndex]
+		&& GetFragmentTier(FragmentIndex) == EBox3DFragmentTier::Body;
+	if (!bHasBody && !bDrawn)
 	{
 		return;
 	}
@@ -790,21 +1089,11 @@ void ABox3DFracturedActor::DestroyFragment(int32 FragmentIndex)
 		FragmentBodies[FragmentIndex] = b3BodyId{};
 	}
 
-	if (FragmentSections.IsValidIndex(FragmentIndex))
+	if (FragmentDestroyed.IsValidIndex(FragmentIndex))
 	{
-		for (const int32 Section : { FragmentSections[FragmentIndex].X, FragmentSections[FragmentIndex].Y })
-		{
-			if (Section != INDEX_NONE)
-			{
-				Mesh->ClearMeshSection(Section);
-			}
-		}
-		FragmentSections[FragmentIndex] = FIntPoint(INDEX_NONE, INDEX_NONE);
+		FragmentDestroyed[FragmentIndex] = true;
 	}
-	SectionGeometry.RemoveAll([FragmentIndex](const FSectionGeometry& Section)
-	{
-		return Section.FragmentIndex == FragmentIndex;
-	});
+	MarkRenderDirty();
 
 	if (bStructureActive && !StructureGraph.IsChunkDestroyed(FragmentIndex))
 	{
@@ -859,6 +1148,7 @@ bool ABox3DFracturedActor::DetachFragment(int32 FragmentIndex, FVector WorldLine
 	}
 	b3Body_SetLinearVelocity(Body, Box3D::ToB3(WorldLinearVelocity));
 	b3Body_SetAngularVelocity(Body, Box3D::ToB3Dir(WorldAngularVelocity));
+	MarkRenderDirty();
 	return true;
 }
 
@@ -1000,9 +1290,13 @@ void ABox3DFracturedActor::DestroyFragmentPhysics()
 
 void ABox3DFracturedActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	if (UBox3DWorldSubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UBox3DWorldSubsystem>() : nullptr)
+	if (UWorld* World = GetWorld())
 	{
-		Subsystem->UnregisterFracturedActor(this);
+		World->GetTimerManager().ClearTimer(RenderFlushTimer);
+		if (UBox3DWorldSubsystem* Subsystem = World->GetSubsystem<UBox3DWorldSubsystem>())
+		{
+			Subsystem->UnregisterFracturedActor(this);
+		}
 	}
 	DestroyFragmentPhysics();
 	Super::EndPlay(EndPlayReason);
@@ -1075,10 +1369,11 @@ void ABox3DFracturedActor::GetLiveWeldPairs(TArray<FIntPoint>& OutPairs) const
 int32 ABox3DFracturedActor::ApplyVertexDent(FVector WorldImpactPoint,
 	FVector WorldImpactNormal, float RadiusCm, float MaxDepthCm, float FalloffExponent)
 {
-	if (SectionGeometry.IsEmpty() || Mesh == nullptr)
+	if (RenderGeometry.IsEmpty() || AttachedMesh == nullptr)
 	{
 		return 0;
 	}
+	FlushRenderState();
 
 	const FTransform WorldToActor = GetActorTransform().Inverse();
 	const FVector ActorImpactPoint = WorldToActor.TransformPosition(WorldImpactPoint);
@@ -1088,18 +1383,19 @@ int32 ABox3DFracturedActor::ApplyVertexDent(FVector WorldImpactPoint,
 		return 0;
 	}
 
-	TArray<FVector> Vertices;
-	TArray<FVector> Normals;
 	int32 DisplacedCount = 0;
-	for (FSectionGeometry& Section : SectionGeometry)
+	bool bAttachedChanged = false;
+	for (int32 Index = 0; Index < Fragments.Num(); ++Index)
 	{
-		FTransform Delta(FQuat::Identity,
-			Fragments.IsValidIndex(Section.FragmentIndex)
-				? Fragments[Section.FragmentIndex].Centroid
-				: FVector::ZeroVector);
-		const b3BodyId Body = FragmentBodies.IsValidIndex(Section.FragmentIndex)
-			? FragmentBodies[Section.FragmentIndex]
-			: b3BodyId{};
+		const EBox3DFragmentRenderState State = FragmentRenderStates[Index];
+		if (State == EBox3DFragmentRenderState::None)
+		{
+			continue;
+		}
+		// Body-local -> actor space: the live body pose, or the spawn pose for
+		// bodiless fragments.
+		FTransform Delta(FQuat::Identity, Fragments[Index].Centroid);
+		const b3BodyId Body = GetFragmentBody(Index);
 		if (b3Body_IsValid(Body))
 		{
 			const b3WorldTransform Transform = b3Body_GetTransform(Body);
@@ -1112,61 +1408,48 @@ int32 ABox3DFracturedActor::ApplyVertexDent(FVector WorldImpactPoint,
 		Dent.RadiusCm = RadiusCm;
 		Dent.MaxDepthCm = MaxDepthCm;
 		Dent.FalloffExponent = FalloffExponent;
-		const int32 SectionDisplaced = Box3D::Deform::ApplyVertexDent(Section.LocalVertices, Dent);
-		if (SectionDisplaced == 0)
+		const int32 FragmentDisplaced = Box3D::Deform::ApplyVertexDent(RenderGeometry[Index].Vertices, Dent);
+		if (FragmentDisplaced == 0)
 		{
 			continue;
 		}
-		DisplacedCount += SectionDisplaced;
+		DisplacedCount += FragmentDisplaced;
 
-		Vertices.Reset(Section.LocalVertices.Num());
-		Normals.Reset(Section.LocalNormals.Num());
-		for (int32 VertexIndex = 0; VertexIndex < Section.LocalVertices.Num(); ++VertexIndex)
+		if (State == EBox3DFragmentRenderState::Attached)
 		{
-			Vertices.Add(Delta.TransformPosition(Section.LocalVertices[VertexIndex]));
-			Normals.Add(Delta.TransformVectorNoScale(Section.LocalNormals[VertexIndex]));
+			bAttachedChanged = true;
 		}
-		Mesh->UpdateMeshSection_LinearColor(Section.SectionIndex, Vertices, Normals,
-			TArray<FVector2D>(), TArray<FLinearColor>(), TArray<FProcMeshTangent>());
+		else if (UStaticMeshComponent* Component = FragmentComponents[Index])
+		{
+			Component->SetStaticMesh(BuildStaticMesh(MakeArrayView(&Index, 1), /*bCentroidRelative*/ true));
+		}
+	}
+	if (bAttachedChanged)
+	{
+		RebuildAttachedMesh();
 	}
 	return DisplacedCount;
 }
 
 void ABox3DFracturedActor::SyncFragments()
 {
-	if (SectionGeometry.IsEmpty() || Mesh == nullptr)
+	if (bRenderDirty)
 	{
-		return;
+		FlushRenderState();
 	}
-
-	const FTransform WorldToActor = GetActorTransform().Inverse();
-	TArray<FVector> Vertices;
-	TArray<FVector> Normals;
-	for (const FSectionGeometry& Section : SectionGeometry)
+	for (int32 Index = 0; Index < FragmentComponents.Num(); ++Index)
 	{
-		const b3BodyId Body = FragmentBodies.IsValidIndex(Section.FragmentIndex)
-			? FragmentBodies[Section.FragmentIndex]
-			: b3BodyId{};
-		// Asleep bodies have not moved since their last synced pose (and never
-		// need a first sync: the sections start at the spawn pose).
+		if (FragmentComponents[Index] == nullptr)
+		{
+			continue;
+		}
+		// Asleep bodies have not moved since their last synced pose.
+		const b3BodyId Body = GetFragmentBody(Index);
 		if (!b3Body_IsValid(Body) || !b3Body_IsAwake(Body))
 		{
 			continue;
 		}
-
-		const b3WorldTransform Transform = b3Body_GetTransform(Body);
-		const FTransform Delta =
-			FTransform(Box3D::ToUE(Transform.q), Box3D::ToUEPos(Transform.p)) * WorldToActor;
-
-		Vertices.Reset(Section.LocalVertices.Num());
-		Normals.Reset(Section.LocalNormals.Num());
-		for (int32 Index = 0; Index < Section.LocalVertices.Num(); ++Index)
-		{
-			Vertices.Add(Delta.TransformPosition(Section.LocalVertices[Index]));
-			Normals.Add(Delta.TransformVectorNoScale(Section.LocalNormals[Index]));
-		}
-		Mesh->UpdateMeshSection_LinearColor(Section.SectionIndex, Vertices, Normals,
-			TArray<FVector2D>(), TArray<FLinearColor>(), TArray<FProcMeshTangent>());
+		SyncFragmentComponent(Index);
 	}
 }
 
@@ -1269,6 +1552,9 @@ namespace Box3D
 		Actor->TierThresholds = Params.Tiers;
 		Actor->DebrisSpeed = Params.DebrisSpeed;
 		Actor->DebrisSystem = Params.DebrisSystem;
+		Actor->bFragmentsCastShadow = Params.bCastShadow;
+		Actor->bFragmentsAffectIndirectLighting = Params.bAffectIndirectLighting;
+		Actor->bFragmentsReceiveDecals = Params.bReceivesDecals;
 		// Fragment/actor space impact, already converted for the fracture core.
 		Actor->DebrisImpactPoint = FractureParams.ImpactPoint;
 		Actor->InitializeFragments(MoveTemp(Fragments), SourceMaterial, bCreatePhysics);
