@@ -44,9 +44,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Fracture", meta = (ClampMin = "1"))
 	float FragmentDensity = 400.0f;
 
+	/// Shrink each fragment's physics hull toward its centroid (cm) so neighbours
+	/// never start overlapping; rendering is unaffected.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Fracture", meta = (ClampMin = "0"))
+	float HullInsetCm = 0.0f;
+
 	/// Keep supported fragments static and enable D4 connectivity + D5 stress.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Structure")
 	bool bStructural = false;
+
+	/// Structural only: anchor every fragment instead of detecting support from
+	/// the static bodies it touches (cladding glued to an immovable surface).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Structure", meta = (EditCondition = "bStructural"))
+	bool bAnchorAllFragments = false;
 
 	/// Per-material sustained-load capacities in pascals. A non-positive value
 	/// disables damage for that load mode.
@@ -79,6 +89,11 @@ public:
 	/// Fragments below this volume (cm^3) merge into a neighbor during fracture.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Fracture", meta = (ClampMin = "0"))
 	float MinFragmentVolume = 0.0f;
+
+	/// Mesh-local axis (0/1/2) to flatten Voronoi sites on, so thin slabs break
+	/// into full-thickness prisms instead of layered flakes; -1 = free 3D sites.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Fracture", meta = (ClampMin = "-1", ClampMax = "2"))
+	int32 FlattenAxis = -1;
 
 	/// Volume thresholds routing fragments into Body / Debris / Dust tiers.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box3D|Tiers")

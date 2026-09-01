@@ -48,14 +48,20 @@ and [NETWORKING.md](NETWORKING.md) for snapshot/prediction primitives.
 - world/local impact position as documented by the caller;
 - `ImpactRadius` and `RadialBias` for impact-biased site placement;
 - `MinFragmentVolume`, which deterministically merges undersized cells into the
-  neighbour with the largest shared face.
+  neighbour with the largest shared face;
+- `FlattenAxis`, which snaps every site to the proxy's centre on one local axis so
+  thin slabs break into full-thickness prisms rather than layered flakes
+  (`INDEX_NONE` keeps free 3D sites and the previous layouts/hashes).
+- `Sites`, explicit proxy-local sites that replace seeded generation (a jittered
+  grid for cladding, for instance) on the same deterministic clipper.
 
 Sites, bisector planes, and layout-hash inputs are quantized to `0.01 cm`, and
 iteration/pair order is fixed. Each `FBox3DFragmentData` contains convex geometry,
 volume, centroid, faces, and symmetric shared-face adjacency. Use
 `FractureLayoutHash` to compare layouts, not pointer identity or actor order.
 
-`Box3D::FractureMesh` is the authority-only actor handoff. It resolves the source
+`Box3D::FractureConvexProxy` fractures a bare convex proxy at a given pose with no
+source component (callers that render their own cladding). `Box3D::FractureMesh` is the authority-only actor handoff. It resolves the source
 proxy, creates an `ABox3DFracturedActor`, emits exterior/interior procedural mesh
 sections, hides the intact source mesh, disables its Chaos collision, and removes
 its static-mirror body. Body-tier fragments receive Box3D hulls; adjacent cells
@@ -67,6 +73,12 @@ BreakForce = SharedFaceAreaCm2 * MaterialToughnessNPerCm2
 
 `MaterialToughness <= 0` makes welds unbreakable. Sleeping assemblies report zero
 joint force, so a physical weld will not overload until its fragments wake.
+
+`HullInsetCm` pulls every fragment's physics hull a little toward its centroid
+(rendering unchanged). Exact Voronoi hulls touch face-to-face and can start
+sub-millimetre penetrated; the resulting push-out friction is enough to pin a
+fragment detached from a static assembly between its neighbours. A millimetre
+or two of inset removes the squeeze.
 
 ### Energy intake
 
@@ -212,6 +224,16 @@ fragments as nodes and shared faces as bonds. `DetectAnchors` marks chunks whose
 inflated AABBs overlap Box3D static bodies; this is deliberately a conservative
 broad-phase support test. If no anchors are found, the actor falls back to normal
 dynamic rubble and `IsStructureActive()` is false.
+
+Set `bAnchorAllFragments` (params, event params, destructible component) to make
+every fragment with a body an anchor instead of running `DetectAnchors`: cladding
+glued to an immovable surface then never depends on what the b3 world holds
+behind it. Such an assembly only loses pieces through `DetachFragment` — which
+destroys the fragment's welds, drops it from the graph, flips it dynamic and
+launches it with the given velocities — or `DestroyFragment`, which also removes
+detached chips. `FindFragmentAtPoint` / `FindNearestFragment` locate the piece
+under a hit; `IsFragmentAttached` / `CountAttachedFragments` report what is still
+held by the structure.
 
 `DestroyFragment` and broken welds update connectivity immediately. A fixed-order
 flood fill finds islands with no live path to an anchor. Unsupported chunks queue

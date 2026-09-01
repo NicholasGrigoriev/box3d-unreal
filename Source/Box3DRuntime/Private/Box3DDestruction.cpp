@@ -84,6 +84,7 @@ namespace Box3D::Destruction
 		Params.ImpactRadius = Event.Params.ImpactRadius;
 		Params.RadialBias = Event.Params.RadialBias;
 		Params.MinFragmentVolume = Event.Params.MinFragmentVolume;
+		Params.FlattenAxis = Event.Params.FlattenAxis;
 		return Params;
 	}
 

@@ -61,6 +61,21 @@ namespace Box3D::Fracture
 		/// the threshold. Merged fragments are unions of convex cells (possibly
 		/// non-convex); volumes add exactly, adjacency stays symmetric.
 		double MinFragmentVolume = 0.0;
+
+		/// Snap every site's coordinate on this proxy-local axis (0/1/2) to the
+		/// proxy's bounds centre, so all bisector planes stand perpendicular to
+		/// that axis and every cell is a prism spanning the proxy's full extent
+		/// on it. For thin slabs (cladding, glass, panels) where layered
+		/// front/back cells would jam behind each other. INDEX_NONE = free 3D sites.
+		int32 FlattenAxis = INDEX_NONE;
+
+		/// Explicit proxy-local sites. When non-empty they replace seeded
+		/// generation (Seed, CellCount, RadialBias and ImpactRadius are ignored):
+		/// each site is flattened, dropped when outside the proxy, quantized and
+		/// deduplicated on the grid, in array order. Lets callers lay cells out
+		/// deliberately (a jittered grid for cladding) on the same deterministic
+		/// clipper.
+		TArray<FVector> Sites;
 	};
 
 	/// One convex face of a fragment. Vertex indices wind counter-clockwise seen

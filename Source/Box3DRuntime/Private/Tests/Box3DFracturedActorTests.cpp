@@ -450,4 +450,145 @@ bool FBox3DFracturedActorOverloadBreakTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+/// Anchor-all cladding: no ground anywhere, yet the structural assembly is live
+/// and holds still; a detached fragment becomes a free body that flies while
+/// its neighbours stay put, point lookups find the right fragment, and a
+/// detached chip can still be destroyed (it is already "gone" in the graph).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DFracturedActorAnchorAllDetachTest,
+	"Box3DUnreal.FracturedActor.AnchorAllAndDetach", BOX3D_TEST_FLAGS)
+bool FBox3DFracturedActorAnchorAllDetachTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld Test;
+
+	// A 100 x 100 x 10 slab floating in mid-air: nothing to anchor to.
+	UStaticMeshComponent* Component = Box3DTest::SpawnSceneMesh(Test.World, Box3DTest::LoadCubeMesh(),
+		FTransform(FQuat::Identity, FVector(0, 0, 500), FVector(1.0, 1.0, 0.1)),
+		EComponentMobility::Movable, ECollisionEnabled::QueryAndPhysics);
+
+	FBox3DFractureMeshParams Params;
+	Params.Fracture.Seed = 7;
+	Params.Fracture.CellCount = 8;
+	Params.bStartAsleep = true;
+	Params.bStructural = true;
+	Params.bAnchorAllFragments = true;
+	Params.MaterialToughness = 0.0f;
+	Params.Fracture.FlattenAxis = 2;
+	ABox3DFracturedActor* Actor = Box3D::FractureMesh(Component, Params);
+	if (!TestNotNull(TEXT("fractured actor spawned"), Actor))
+	{
+		return false;
+	}
+	TestTrue(TEXT("structure live without any static neighbour"), Actor->IsStructureActive());
+	for (int32 Index = 0; Index < Actor->GetFragmentCount(); ++Index)
+	{
+		// Flattened sites: every cell is a prism through the whole 10 cm thickness.
+		FBox Box(ForceInit);
+		for (const FVector& Vertex : Actor->GetFragments()[Index].Vertices)
+		{
+			Box += Vertex;
+		}
+		TestTrue(FString::Printf(TEXT("fragment %d spans the full thickness (%f..%f)"), Index, Box.Min.Z, Box.Max.Z),
+			FMath::IsNearlyEqual(Box.Min.Z, -5.0, 0.05) && FMath::IsNearlyEqual(Box.Max.Z, 5.0, 0.05));
+	}
+	const int32 Alive = Actor->CountAliveFragments();
+	TestTrue(TEXT("fragments got bodies"), Alive >= 4);
+	TestEqual(TEXT("every fragment starts attached"), Actor->CountAttachedFragments(), Alive);
+
+	Test.Step(30);
+	for (int32 Index = 0; Index < Actor->GetFragmentCount(); ++Index)
+	{
+		const FVector Expected = Actor->GetActorTransform().TransformPosition(Actor->GetFragments()[Index].Centroid);
+		TestTrue(FString::Printf(TEXT("fragment %d holds still in mid-air"), Index),
+			Actor->GetFragmentWorldCentroid(Index).Equals(Expected, 0.01));
+	}
+
+	// Point lookup: each centroid maps to its own fragment.
+	int32 Target = INDEX_NONE;
+	for (int32 Index = 0; Index < Actor->GetFragmentCount() && Target == INDEX_NONE; ++Index)
+	{
+		if (Actor->IsFragmentAttached(Index))
+		{
+			Target = Index;
+		}
+	}
+	if (!TestTrue(TEXT("found an attached fragment"), Target != INDEX_NONE))
+	{
+		return false;
+	}
+	const FVector TargetCentroid = Actor->GetFragmentWorldCentroid(Target);
+	TestEqual(TEXT("centroid lookup hits its own fragment"), Actor->FindFragmentAtPoint(TargetCentroid), Target);
+	TestEqual(TEXT("nearest lookup agrees"), Actor->FindNearestFragment(TargetCentroid, 5.0f), Target);
+	TestEqual(TEXT("far point finds nothing"), Actor->FindFragmentAtPoint(TargetCentroid + FVector(0, 0, 300)), (int32)INDEX_NONE);
+
+	TestTrue(TEXT("detach succeeds"), Actor->DetachFragment(Target, FVector(0, 0, 300), FVector(0, 0, 2)));
+	TestFalse(TEXT("detached fragment is no longer attached"), Actor->IsFragmentAttached(Target));
+	TestTrue(TEXT("detached fragment is still alive"), Actor->IsFragmentAlive(Target));
+	TestEqual(TEXT("attached count dropped by one"), Actor->CountAttachedFragments(), Alive - 1);
+	TestEqual(TEXT("moving chip is excluded from attached lookups"),
+		Actor->FindFragmentAtPoint(TargetCentroid, /*bAttachedOnly*/ true), (int32)INDEX_NONE);
+	TestFalse(TEXT("detaching an invalid index fails"), Actor->DetachFragment(999, FVector::ZeroVector));
+
+	Test.Step(30);
+	const FVector After = Actor->GetFragmentWorldCentroid(Target);
+	TestTrue(FString::Printf(TEXT("chip flew (moved %f cm)"), FVector::Dist(After, TargetCentroid)),
+		FVector::Dist(After, TargetCentroid) > 5.0);
+	for (int32 Index = 0; Index < Actor->GetFragmentCount(); ++Index)
+	{
+		if (Index == Target || !Actor->IsFragmentAlive(Index))
+		{
+			continue;
+		}
+		const FVector Expected = Actor->GetActorTransform().TransformPosition(Actor->GetFragments()[Index].Centroid);
+		TestTrue(FString::Printf(TEXT("fragment %d unaffected by the detach"), Index),
+			Actor->GetFragmentWorldCentroid(Index).Equals(Expected, 0.01));
+	}
+	TestEqual(TEXT("no promotions queued: neighbours are anchors themselves"), Actor->GetPendingPromotionCount(), 0);
+
+	Actor->DestroyFragment(Target);
+	TestFalse(TEXT("detached chip can be destroyed"), Actor->IsFragmentAlive(Target));
+	TestEqual(TEXT("alive count reflects the destroy"), Actor->CountAliveFragments(), Alive - 1);
+	Actor->DestroyFragment(Target);
+	TestEqual(TEXT("double destroy is a no-op"), Actor->CountAliveFragments(), Alive - 1);
+	return true;
+}
+
+/// Proxy entry point: a bare convex prism becomes an anchored fractured actor
+/// at the given pose with no source component involved, and a nudged detach
+/// moves the chip before it flies.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DFracturedActorConvexProxyTest,
+	"Box3DUnreal.FracturedActor.ConvexProxyEntry", BOX3D_TEST_FLAGS)
+bool FBox3DFracturedActorConvexProxyTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld Test;
+	const FFractureProxy Proxy = MakeBoxProxy(FVector(25, 25, 5), FVector(25, 25, 5));
+	const FTransform ProxyToWorld(FQuat::Identity, FVector(100, 200, 300));
+
+	FBox3DFractureMeshParams Params;
+	Params.Fracture.Sites = { FVector(10, 10, 5), FVector(40, 10, 5), FVector(25, 40, 5) };
+	Params.Fracture.FlattenAxis = 2;
+	Params.Fracture.ImpactPoint = ProxyToWorld.TransformPosition(FVector(10, 10, 5));
+	Params.bStartAsleep = true;
+	Params.bStructural = true;
+	Params.bAnchorAllFragments = true;
+	Params.MaterialToughness = 0.0f;
+	Params.HullInsetCm = 0.2f;
+	ABox3DFracturedActor* Actor = Box3D::FractureConvexProxy(Test.World, ProxyToWorld, Proxy, nullptr, Params);
+	if (!TestNotNull(TEXT("actor spawned from a bare proxy"), Actor))
+	{
+		return false;
+	}
+	TestEqual(TEXT("three sites -> three fragments"), Actor->GetFragmentCount(), 3);
+	TestTrue(TEXT("placed at the proxy pose"), Actor->GetActorLocation().Equals(FVector(100, 200, 300), 0.01));
+	TestTrue(TEXT("anchored structure"), Actor->IsStructureActive());
+	TestEqual(TEXT("all attached"), Actor->CountAttachedFragments(), 3);
+	TestTrue(TEXT("sections rendered"), Actor->GetMesh()->GetNumSections() >= 3);
+	const FVector Expected = ProxyToWorld.TransformPosition(Actor->GetFragments()[0].Centroid);
+	TestTrue(TEXT("fragment centroid lands in world space"), Actor->GetFragmentWorldCentroid(0).Equals(Expected, 0.01));
+
+	TestTrue(TEXT("nudged detach"), Actor->DetachFragment(0, FVector::ZeroVector, FVector::ZeroVector, FVector(0, 0, 7)));
+	TestTrue(TEXT("chip moved by the nudge before any step"),
+		Actor->GetFragmentWorldCentroid(0).Equals(Expected + FVector(0, 0, 7), 0.05));
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

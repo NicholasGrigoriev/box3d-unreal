@@ -53,6 +53,13 @@ struct FBox3DFractureMeshParams
 	/// Fragment density in kg/m^3.
 	float FragmentDensity = 400.0f;
 
+	/// Pull every fragment hull vertex this far (cm) toward its centroid before
+	/// cooking, so neighbouring hulls never overlap. Coincident Voronoi faces
+	/// otherwise leave sub-millimetre penetrations whose push-out friction can
+	/// pin a fragment detached from a static assembly between its neighbours.
+	/// Rendering is unaffected; 0 keeps exact hulls.
+	float HullInsetCm = 0.0f;
+
 	/// Spawn the fragment bodies asleep (welded rubble at rest). Defaults off
 	/// because fracture usually follows an impact that should scatter the pieces.
 	bool bStartAsleep = false;
@@ -77,6 +84,13 @@ struct FBox3DFractureMeshParams
 	/// anchors at build fall back to plain dynamic rubble (the default behavior).
 	bool bStructural = false;
 
+	/// Structural assemblies only: every fragment that gets a body is an anchor,
+	/// skipping DetectAnchors. For cladding glued to an immovable surface (a
+	/// destructible skin over a real wall) this makes support independent of
+	/// what happens to sit behind the mesh; fragments then leave the assembly
+	/// only through DetachFragment / DestroyFragment.
+	bool bAnchorAllFragments = false;
+
 	/// Sustained-load capacities in pascals. Non-positive disables that mode.
 	float TensionStrengthPa = 1.0e6f;
 	float CompressionStrengthPa = 5.0e6f;
@@ -96,6 +110,9 @@ struct FBox3DFractureMeshParams
 /// adjacency from the fracture core, not bounds proximity) are welded with
 /// break force SharedFaceArea x MaterialToughness. Tick snaps overloaded welds
 /// (OnWeldBroken) and drives the PMC sections from the body transforms.
+/// Game code chips pieces off deliberately with DetachFragment (after finding
+/// them with FindFragmentAtPoint / FindNearestFragment) and removes them for
+/// good with DestroyFragment.
 UCLASS(BlueprintType, NotBlueprintable, ClassGroup = (Physics))
 class BOX3DRUNTIME_API ABox3DFracturedActor : public AActor
 {
@@ -120,6 +137,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture", meta = (ClampMin = "1"))
 	float FragmentDensity = 400.0f;
 
+	/// Physics-hull inset toward the centroid (cm); see FBox3DFractureMeshParams::
+	/// HullInsetCm. Set before InitializeFragments.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture", meta = (ClampMin = "0"))
+	float HullInsetCm = 0.0f;
+
 	/// Spawn the fragment bodies asleep. Set before InitializeFragments.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture")
 	bool bStartAsleep = false;
@@ -128,6 +150,11 @@ public:
 	/// bStructural. Set before InitializeFragments.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture")
 	bool bStructural = false;
+
+	/// Every fragment with a body is an anchor (see FBox3DFractureMeshParams::
+	/// bAnchorAllFragments). Set before InitializeFragments.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture")
+	bool bAnchorAllFragments = false;
 
 	/// Sustained structural tension capacity in pascals; <= 0 disables tension damage.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture|Stress", meta = (ClampMin = "0"))
@@ -241,6 +268,48 @@ public:
 	/// already-destroyed fragments.
 	UFUNCTION(BlueprintCallable, Category = "Fracture")
 	void DestroyFragment(int32 FragmentIndex);
+
+	/// Release one fragment from the assembly as a free body: its welds are
+	/// destroyed, the structure graph drops it (neighbours re-evaluate support),
+	/// the body flips static->dynamic, wakes, is moved by WorldNudgeCm (clears
+	/// face-to-face contact with what it leaves behind) and takes the given
+	/// velocities (cm/s, rad/s). The fragment keeps rendering and can still be
+	/// destroyed later. Returns false for invalid or bodiless fragments.
+	UFUNCTION(BlueprintCallable, Category = "Fracture")
+	bool DetachFragment(int32 FragmentIndex, FVector WorldLinearVelocity,
+		FVector WorldAngularVelocity = FVector::ZeroVector, FVector WorldNudgeCm = FVector::ZeroVector);
+
+	/// The fragment still has a physics body (not destroyed, not visual-only).
+	UFUNCTION(BlueprintPure, Category = "Fracture")
+	bool IsFragmentAlive(int32 FragmentIndex) const;
+
+	/// Alive and still held static by the structure (never detached or promoted).
+	UFUNCTION(BlueprintPure, Category = "Fracture")
+	bool IsFragmentAttached(int32 FragmentIndex) const;
+
+	UFUNCTION(BlueprintPure, Category = "Fracture")
+	int32 CountAliveFragments() const;
+
+	UFUNCTION(BlueprintPure, Category = "Fracture")
+	int32 CountAttachedFragments() const;
+
+	/// World-space centroid of the fragment's current body pose (spawn pose
+	/// for bodiless fragments).
+	UFUNCTION(BlueprintPure, Category = "Fracture")
+	FVector GetFragmentWorldCentroid(int32 FragmentIndex) const;
+
+	/// Index of the alive fragment whose hull contains the world point, tested
+	/// against the fragment's current body pose, or INDEX_NONE. Merged
+	/// (non-convex) fragments are tested as the intersection of their face
+	/// half-spaces, which can miss points inside a concavity; pair with
+	/// FindNearestFragment for a fallback.
+	UFUNCTION(BlueprintPure, Category = "Fracture")
+	int32 FindFragmentAtPoint(FVector WorldPoint, bool bAttachedOnly = true) const;
+
+	/// Alive fragment whose current centroid lies nearest to the world point,
+	/// within MaxDistanceCm; INDEX_NONE when none qualifies.
+	UFUNCTION(BlueprintPure, Category = "Fracture")
+	int32 FindNearestFragment(FVector WorldPoint, float MaxDistanceCm, bool bAttachedOnly = true) const;
 
 	/// Promote queued unsupported chunks static->dynamic, up to
 	/// UBox3DSettings::MaxPromotionsPerTick per call (FIFO overflow carries to
@@ -391,6 +460,15 @@ namespace Box3D
 	/// Fracture a static mesh component in place. This is a local destruction
 	/// decision and therefore refuses to run without simulation authority.
 	BOX3DRUNTIME_API ABox3DFracturedActor* FractureMesh(UStaticMeshComponent* Component,
+		const FBox3DFractureMeshParams& Params);
+
+	/// Fracture an explicit convex proxy (proxy-local cm, scale already baked)
+	/// into a fractured actor placed at ProxyToWorld (rotation + translation).
+	/// Params.Fracture.ImpactPoint is world space, as for FractureMesh. Nothing
+	/// is swapped out: the caller owns whatever rendered the proxy until now.
+	/// Authority only; null on failure.
+	BOX3DRUNTIME_API ABox3DFracturedActor* FractureConvexProxy(UWorld* World, const FTransform& ProxyToWorld,
+		const Fracture::FFractureProxy& Proxy, UMaterialInterface* SourceMaterial,
 		const FBox3DFractureMeshParams& Params);
 
 	/// Deterministically regenerate only the render fragment set from a received

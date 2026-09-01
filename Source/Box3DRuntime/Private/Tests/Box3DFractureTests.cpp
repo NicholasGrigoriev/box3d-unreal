@@ -396,4 +396,45 @@ bool FBox3DFractureThreadCountDeterminismTest::RunTest(const FString& Parameters
 	return true;
 }
 
+/// Explicit sites replace seeded generation: outside sites are dropped, grid
+/// duplicates collapse, FlattenAxis still applies, and the layout is a pure
+/// function of the sites.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DFractureExplicitSitesTest,
+	"Box3DUnreal.Fracture.ExplicitSites", BOX3D_TEST_FLAGS)
+bool FBox3DFractureExplicitSitesTest::RunTest(const FString& Parameters)
+{
+	const FFractureProxy Proxy = MakeBoxProxy(FVector::ZeroVector, FVector(50, 50, 50));
+	FFractureParams Params;
+	Params.Seed = 99;
+	Params.CellCount = 40; // ignored
+	Params.FlattenAxis = 2;
+	Params.Sites = { FVector(-25, -25, 40), FVector(25, -25, -40), FVector(-25, 25, 0), FVector(25, 25, 10),
+		FVector(200, 0, 0), FVector(25.001, 25.001, 0) };
+
+	TArray<FBox3DFragmentData> Fragments;
+	TestTrue(TEXT("fracture succeeds"), Fracture(Proxy, Params, Fragments));
+	TestEqual(TEXT("four usable sites -> four cells"), Fragments.Num(), 4);
+	double Volume = 0.0;
+	for (const FBox3DFragmentData& Fragment : Fragments)
+	{
+		Volume += Fragment.Volume;
+		FBox Box(ForceInit);
+		for (const FVector& Vertex : Fragment.Vertices)
+		{
+			Box += Vertex;
+		}
+		TestTrue(TEXT("flattened cell spans the full height"),
+			FMath::IsNearlyEqual(Box.Min.Z, -50.0, 0.05) && FMath::IsNearlyEqual(Box.Max.Z, 50.0, 0.05));
+		TestTrue(TEXT("quadrant cell is a 50 x 50 column"),
+			FMath::IsNearlyEqual(Box.GetSize().X, 50.0, 0.05) && FMath::IsNearlyEqual(Box.GetSize().Y, 50.0, 0.05));
+	}
+	TestTrue(TEXT("volume conserved"), FMath::IsNearlyEqual(Volume, 1.0e6, 1.0));
+
+	TArray<FBox3DFragmentData> Again;
+	Params.Seed = 1;
+	Fracture(Proxy, Params, Again);
+	TestEqual(TEXT("seed is irrelevant with explicit sites"), FractureLayoutHash(Again), FractureLayoutHash(Fragments));
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

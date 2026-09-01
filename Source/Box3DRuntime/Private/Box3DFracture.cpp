@@ -474,14 +474,49 @@ namespace Box3D::Fracture
 			const TArray<TPair<FVector, double>>& ProxyPlanes)
 		{
 			FBox Bounds(Proxy.Vertices.GetData(), Proxy.Vertices.Num());
-			FRandomStream Stream(Params.Seed);
-
-			const double Bias = FMath::Clamp(Params.RadialBias, 0.0, 1.0);
-			const double ImpactRadius = FMath::Max(Params.ImpactRadius, QuantizeStep);
 
 			TArray<FVector> Sites;
-			Sites.Reserve(Params.CellCount);
 			TSet<FIntVector> SeenGrid;
+			const auto TryAddSite = [&](FVector Candidate)
+			{
+				if (Params.FlattenAxis >= 0 && Params.FlattenAxis <= 2)
+				{
+					Candidate[Params.FlattenAxis] = Bounds.GetCenter()[Params.FlattenAxis];
+				}
+				for (const TPair<FVector, double>& Plane : ProxyPlanes)
+				{
+					if ((Plane.Key | Candidate) - Plane.Value > ClipEpsilon)
+					{
+						return;
+					}
+				}
+				const FVector Site = Quantize(Candidate);
+				const FIntVector GridKey(
+					int32(FMath::RoundToDouble(Site.X / QuantizeStep)),
+					int32(FMath::RoundToDouble(Site.Y / QuantizeStep)),
+					int32(FMath::RoundToDouble(Site.Z / QuantizeStep)));
+				bool bAlreadySeen = false;
+				SeenGrid.Add(GridKey, &bAlreadySeen);
+				if (!bAlreadySeen)
+				{
+					Sites.Add(Site);
+				}
+			};
+
+			if (!Params.Sites.IsEmpty())
+			{
+				Sites.Reserve(Params.Sites.Num());
+				for (const FVector& Candidate : Params.Sites)
+				{
+					TryAddSite(Candidate);
+				}
+				return Sites;
+			}
+
+			FRandomStream Stream(Params.Seed);
+			const double Bias = FMath::Clamp(Params.RadialBias, 0.0, 1.0);
+			const double ImpactRadius = FMath::Max(Params.ImpactRadius, QuantizeStep);
+			Sites.Reserve(Params.CellCount);
 
 			const int32 MaxAttempts = Params.CellCount * 256;
 			for (int32 Attempt = 0; Attempt < MaxAttempts && Sites.Num() < Params.CellCount; ++Attempt)
@@ -500,32 +535,7 @@ namespace Box3D::Fracture
 						Stream.FRandRange(float(Bounds.Min.Y), float(Bounds.Max.Y)),
 						Stream.FRandRange(float(Bounds.Min.Z), float(Bounds.Max.Z)));
 				}
-
-				bool bInside = true;
-				for (const TPair<FVector, double>& Plane : ProxyPlanes)
-				{
-					if ((Plane.Key | Candidate) - Plane.Value > ClipEpsilon)
-					{
-						bInside = false;
-						break;
-					}
-				}
-				if (!bInside)
-				{
-					continue;
-				}
-
-				const FVector Site = Quantize(Candidate);
-				const FIntVector GridKey(
-					int32(FMath::RoundToDouble(Site.X / QuantizeStep)),
-					int32(FMath::RoundToDouble(Site.Y / QuantizeStep)),
-					int32(FMath::RoundToDouble(Site.Z / QuantizeStep)));
-				bool bAlreadySeen = false;
-				SeenGrid.Add(GridKey, &bAlreadySeen);
-				if (!bAlreadySeen)
-				{
-					Sites.Add(Site);
-				}
+				TryAddSite(Candidate);
 			}
 			return Sites;
 		}
