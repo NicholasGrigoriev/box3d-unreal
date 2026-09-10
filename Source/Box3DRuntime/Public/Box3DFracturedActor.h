@@ -124,6 +124,23 @@ struct FBox3DFractureMeshParams
 	bool bReceivesDecals = true;
 };
 
+/// Optional shared source of loose-chip meshes for a fractured actor. When
+/// set (before the first detach), MakeFragmentLoose asks it for a fragment's
+/// mesh before building one and hands back what it built, so actors fractured
+/// from identical fragment data (cached cladding cells) share one UStaticMesh
+/// per chip instead of each building its own. Meshes it stores are created
+/// with GetMeshOuter() as outer, so they outlive any single actor; the cache
+/// owns their lifetime. Dented actors (ApplyVertexDent) stop consulting it,
+/// as their geometry no longer matches the shared set.
+class BOX3DRUNTIME_API IBox3DChipMeshCache
+{
+public:
+	virtual ~IBox3DChipMeshCache() = default;
+	virtual UStaticMesh* FindChipMesh(int32 FragmentIndex) = 0;
+	virtual void StoreChipMesh(int32 FragmentIndex, UStaticMesh* Mesh) = 0;
+	virtual UObject* GetMeshOuter() = 0;
+};
+
 /// A fractured static mesh. Fragments still held by the assembly (static
 /// bodies, or every fragment on the visual-only client path) are baked into ONE
 /// runtime static mesh — exterior faces (inherited from the proxy surface) in a
@@ -292,6 +309,12 @@ public:
 	/// Static meshes built so far (attached rebuilds + chip meshes); a settled
 	/// actor must not grow this from Tick.
 	int32 GetRenderBuildCount() const { return RenderBuildCount; }
+
+	/// Loose-chip meshes taken from ChipMeshCache instead of being built.
+	int32 GetChipMeshCacheHitCount() const { return ChipMeshCacheHits; }
+
+	/// See IBox3DChipMeshCache. Null (the default) builds every chip mesh here.
+	TSharedPtr<IBox3DChipMeshCache> ChipMeshCache;
 
 	/// Render vertices of a Body-tier fragment, relative to its centroid in the
 	/// spawn frame (the body frame); null for fragments that are not drawn.
@@ -494,7 +517,11 @@ private:
 	/// Bake the given fragments into a transient static mesh: two material
 	/// slots (exterior / interior), empty ones dropped. Actor space unless
 	/// bCentroidRelative (chip meshes, body frame). Null when nothing to draw.
-	UStaticMesh* BuildStaticMesh(TArrayView<const int32> FragmentIndices, bool bCentroidRelative);
+	UStaticMesh* BuildStaticMesh(TArrayView<const int32> FragmentIndices, bool bCentroidRelative, UObject* Outer = nullptr);
+
+	/// The chip mesh for one fragment: from ChipMeshCache when it has one, else
+	/// built (and stored there). Null when the fragment has nothing to draw.
+	UStaticMesh* GetOrBuildChipMesh(int32 FragmentIndex);
 
 	void RebuildAttachedMesh();
 	void MakeFragmentLoose(int32 FragmentIndex);
@@ -530,8 +557,11 @@ private:
 	TArray<FFragmentRenderGeometry> RenderGeometry;
 
 	bool bRenderDirty = false;
+	/// ApplyVertexDent changed this actor's render geometry: shared chip meshes no longer match it.
+	bool bRenderGeometryDented = false;
 	FTimerHandle RenderFlushTimer;
 	int32 RenderBuildCount = 0;
+	int32 ChipMeshCacheHits = 0;
 
 	/// Per-fragment tier, parallel to Fragments.
 	TArray<EBox3DFragmentTier> FragmentTiers;
@@ -597,6 +627,16 @@ namespace Box3D
 	BOX3DRUNTIME_API ABox3DFracturedActor* FractureConvexProxy(UWorld* World, const FTransform& ProxyToWorld,
 		const Fracture::FFractureProxy& Proxy, UMaterialInterface* SourceMaterial,
 		const FBox3DFractureMeshParams& Params);
+
+	/// Build a fractured actor from fragments the caller already has (its own
+	/// Fracture::Fracture run, typically cached and reused across identical
+	/// proxies), placed at ProxyToWorld like FractureConvexProxy. Fragment
+	/// geometry is proxy-local cm with scale baked in. Params.Fracture is used
+	/// only for its world-space ImpactPoint (debris burst); nothing is fractured
+	/// here. Authority only; null on failure.
+	BOX3DRUNTIME_API ABox3DFracturedActor* SpawnFracturedActorFromFragments(UWorld* World,
+		const FTransform& ProxyToWorld, TArray<Fracture::FBox3DFragmentData>&& Fragments,
+		UMaterialInterface* SourceMaterial, const FBox3DFractureMeshParams& Params);
 
 	/// Deterministically regenerate only the render fragment set from a received
 	/// authority event. This is the pure-client path and never creates b3 state,

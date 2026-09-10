@@ -390,9 +390,29 @@ void ABox3DFracturedActor::RebuildAttachedMesh()
 	AttachedMesh->SetStaticMesh(Attached.IsEmpty() ? nullptr : BuildStaticMesh(Attached, /*bCentroidRelative*/ false));
 }
 
+UStaticMesh* ABox3DFracturedActor::GetOrBuildChipMesh(int32 FragmentIndex)
+{
+	IBox3DChipMeshCache* Cache = bRenderGeometryDented ? nullptr : ChipMeshCache.Get();
+	if (Cache != nullptr)
+	{
+		if (UStaticMesh* Cached = Cache->FindChipMesh(FragmentIndex))
+		{
+			++ChipMeshCacheHits;
+			return Cached;
+		}
+	}
+	UStaticMesh* ChipMesh = BuildStaticMesh(MakeArrayView(&FragmentIndex, 1), /*bCentroidRelative*/ true,
+		Cache != nullptr ? Cache->GetMeshOuter() : nullptr);
+	if (ChipMesh != nullptr && Cache != nullptr)
+	{
+		Cache->StoreChipMesh(FragmentIndex, ChipMesh);
+	}
+	return ChipMesh;
+}
+
 void ABox3DFracturedActor::MakeFragmentLoose(int32 FragmentIndex)
 {
-	UStaticMesh* ChipMesh = BuildStaticMesh(MakeArrayView(&FragmentIndex, 1), /*bCentroidRelative*/ true);
+	UStaticMesh* ChipMesh = GetOrBuildChipMesh(FragmentIndex);
 	if (ChipMesh == nullptr)
 	{
 		FragmentRenderStates[FragmentIndex] = EBox3DFragmentRenderState::None;
@@ -475,7 +495,7 @@ void ABox3DFracturedActor::SyncFragmentComponent(int32 FragmentIndex) const
 	}
 }
 
-UStaticMesh* ABox3DFracturedActor::BuildStaticMesh(TArrayView<const int32> FragmentIndices, bool bCentroidRelative)
+UStaticMesh* ABox3DFracturedActor::BuildStaticMesh(TArrayView<const int32> FragmentIndices, bool bCentroidRelative, UObject* Outer)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Box3DFracturedActor_BuildStaticMesh);
 
@@ -544,7 +564,7 @@ UStaticMesh* ABox3DFracturedActor::BuildStaticMesh(TArrayView<const int32> Fragm
 		AddTriangles(Geometry.InteriorTriangles, InteriorGroup);
 	}
 
-	UStaticMesh* StaticMesh = NewObject<UStaticMesh>(this, NAME_None, RF_Transient);
+	UStaticMesh* StaticMesh = NewObject<UStaticMesh>(Outer != nullptr ? Outer : static_cast<UObject*>(this), NAME_None, RF_Transient);
 	UMaterialInterface* InteriorMaterial = CoreMaterial != nullptr ? CoreMaterial.Get() : ExteriorMaterial.Get();
 	StaticMesh->GetStaticMaterials().Add(FStaticMaterial(ExteriorMaterial, ExteriorSlotName));
 	StaticMesh->GetStaticMaterials().Add(FStaticMaterial(InteriorMaterial, InteriorSlotName));
@@ -725,7 +745,7 @@ void ABox3DFracturedActor::BuildFragmentPhysics()
 			Welds.Add({ b3CreateWeldJoint(WorldId, &Def), IndexA, IndexB, BreakForce });
 		}
 	}
-	UE_LOG(LogBox3D, Log, TEXT("%s: %d fragment bodies, %d welds, %d debris, %d dust"), *GetNameSafe(this),
+	UE_LOG(LogBox3D, Verbose, TEXT("%s: %d fragment bodies, %d welds, %d debris, %d dust"), *GetNameSafe(this),
 		CountFragmentsInTier(EBox3DFragmentTier::Body), Welds.Num(),
 		CountFragmentsInTier(EBox3DFragmentTier::Debris), CountFragmentsInTier(EBox3DFragmentTier::Dust));
 }
@@ -818,7 +838,7 @@ void ABox3DFracturedActor::InitializeStructure()
 	EnqueueIslands(Islands);
 	InitializeStressSolver();
 
-	UE_LOG(LogBox3D, Log, TEXT("%s: structural assembly live — %d chunks, %d bonds, %d anchors"),
+	UE_LOG(LogBox3D, Verbose, TEXT("%s: structural assembly live — %d chunks, %d bonds, %d anchors"),
 		*GetNameSafe(this), StructureGraph.GetNodeCount(), StructureGraph.GetBondCount(), AnchorCount);
 }
 
@@ -1414,6 +1434,7 @@ int32 ABox3DFracturedActor::ApplyVertexDent(FVector WorldImpactPoint,
 			continue;
 		}
 		DisplacedCount += FragmentDisplaced;
+		bRenderGeometryDented = true;
 
 		if (State == EBox3DFragmentRenderState::Attached)
 		{
@@ -1512,22 +1533,10 @@ namespace Box3D
 		return StaticMesh != nullptr ? FName(*StaticMesh->GetPathName()) : NAME_None;
 	}
 
-	static ABox3DFracturedActor* SpawnFracturedActor(UWorld* World, const FTransform& ProxyToWorld,
-		const Fracture::FFractureProxy& Proxy, UMaterialInterface* SourceMaterial,
-		const FBox3DFractureMeshParams& Params, bool bCreatePhysics, const FString& Context)
+	static ABox3DFracturedActor* SpawnFromFragments(UWorld* World, const FTransform& ProxyToWorld,
+		TArray<Fracture::FBox3DFragmentData>&& Fragments, UMaterialInterface* SourceMaterial,
+		const FBox3DFractureMeshParams& Params, bool bCreatePhysics, const FVector& LocalImpactPoint)
 	{
-		// Fragment space = proxy space (scale baked in), so the world seam is
-		// rotation + translation only.
-		Fracture::FFractureParams FractureParams = Params.Fracture;
-		FractureParams.ImpactPoint = ProxyToWorld.InverseTransformPosition(Params.Fracture.ImpactPoint);
-
-		TArray<Fracture::FBox3DFragmentData> Fragments;
-		if (!Fracture::Fracture(Proxy, FractureParams, Fragments))
-		{
-			UE_LOG(LogBox3D, Warning, TEXT("Box3D fracture produced no fragments for %s"), *Context);
-			return nullptr;
-		}
-
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		ABox3DFracturedActor* Actor = World->SpawnActor<ABox3DFracturedActor>(
@@ -1556,9 +1565,28 @@ namespace Box3D
 		Actor->bFragmentsAffectIndirectLighting = Params.bAffectIndirectLighting;
 		Actor->bFragmentsReceiveDecals = Params.bReceivesDecals;
 		// Fragment/actor space impact, already converted for the fracture core.
-		Actor->DebrisImpactPoint = FractureParams.ImpactPoint;
+		Actor->DebrisImpactPoint = LocalImpactPoint;
 		Actor->InitializeFragments(MoveTemp(Fragments), SourceMaterial, bCreatePhysics);
 		return Actor;
+	}
+
+	static ABox3DFracturedActor* SpawnFracturedActor(UWorld* World, const FTransform& ProxyToWorld,
+		const Fracture::FFractureProxy& Proxy, UMaterialInterface* SourceMaterial,
+		const FBox3DFractureMeshParams& Params, bool bCreatePhysics, const FString& Context)
+	{
+		// Fragment space = proxy space (scale baked in), so the world seam is
+		// rotation + translation only.
+		Fracture::FFractureParams FractureParams = Params.Fracture;
+		FractureParams.ImpactPoint = ProxyToWorld.InverseTransformPosition(Params.Fracture.ImpactPoint);
+
+		TArray<Fracture::FBox3DFragmentData> Fragments;
+		if (!Fracture::Fracture(Proxy, FractureParams, Fragments))
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("Box3D fracture produced no fragments for %s"), *Context);
+			return nullptr;
+		}
+		return SpawnFromFragments(World, ProxyToWorld, MoveTemp(Fragments), SourceMaterial, Params, bCreatePhysics,
+			FractureParams.ImpactPoint);
 	}
 
 	static ABox3DFracturedActor* FractureMeshInternal(UStaticMeshComponent* Component,
@@ -1612,6 +1640,24 @@ namespace Box3D
 			return nullptr;
 		}
 		return SpawnFracturedActor(World, ProxyToWorld, Proxy, SourceMaterial, Params, true, TEXT("convex proxy"));
+	}
+
+	ABox3DFracturedActor* SpawnFracturedActorFromFragments(UWorld* World, const FTransform& ProxyToWorld,
+		TArray<Fracture::FBox3DFragmentData>&& Fragments, UMaterialInterface* SourceMaterial,
+		const FBox3DFractureMeshParams& Params)
+	{
+		UBox3DWorldSubsystem* Subsystem = World != nullptr ? World->GetSubsystem<UBox3DWorldSubsystem>() : nullptr;
+		if (Subsystem == nullptr || !Subsystem->IsSimulationAuthority())
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("Box3D::SpawnFracturedActorFromFragments rejected without simulation authority"));
+			return nullptr;
+		}
+		if (Fragments.IsEmpty())
+		{
+			return nullptr;
+		}
+		return SpawnFromFragments(World, ProxyToWorld, MoveTemp(Fragments), SourceMaterial, Params, true,
+			ProxyToWorld.InverseTransformPosition(Params.Fracture.ImpactPoint));
 	}
 
 	ABox3DFracturedActor* FractureMesh(UStaticMeshComponent* Component, const FBox3DFractureMeshParams& Params)
