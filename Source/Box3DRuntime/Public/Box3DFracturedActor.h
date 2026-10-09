@@ -116,6 +116,14 @@ struct FBox3DFractureMeshParams
 	/// Health removed per second for each unit of overload above capacity.
 	float SustainedOverloadHealthPerSecond = 1.0f;
 
+	/// Exterior (proxy-surface) faces get UV = (Position . ExteriorUVAxisU,
+	/// Position . ExteriorUVAxisV) + ExteriorUVOffset, Position in the proxy's
+	/// space (cm), so pieces cut from textured cladding carry exactly the texture
+	/// of the surface they came from. Zero axes keep the planar per-metre UVs.
+	FVector ExteriorUVAxisU = FVector::ZeroVector;
+	FVector ExteriorUVAxisV = FVector::ZeroVector;
+	FVector2D ExteriorUVOffset = FVector2D::ZeroVector;
+
 	/// Render flags for every fragment primitive (the attached mesh and each
 	/// loose chip). Cladding over real geometry usually turns all three off:
 	/// the wall behind it already shadows, feeds Lumen and takes decals.
@@ -251,6 +259,12 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Fracture|Rendering")
 	bool bFragmentsReceiveDecals = true;
+
+	/// Exterior-face UV mapping; see FBox3DFractureMeshParams::ExteriorUVAxisU.
+	/// Set before InitializeFragments.
+	FVector ExteriorUVAxisU = FVector::ZeroVector;
+	FVector ExteriorUVAxisV = FVector::ZeroVector;
+	FVector2D ExteriorUVOffset = FVector2D::ZeroVector;
 
 	/// Material of the exterior faces (the fractured component's material).
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Fracture")
@@ -482,7 +496,9 @@ private:
 		TArray<int32> ExteriorTriangles;
 		TArray<int32> InteriorTriangles;
 	};
-	static void BuildRenderGeometry(const Box3D::Fracture::FBox3DFragmentData& Fragment, FFragmentRenderGeometry& Out);
+	static void BuildRenderGeometry(const Box3D::Fracture::FBox3DFragmentData& Fragment, FFragmentRenderGeometry& Out,
+		const FVector& ExteriorAxisU = FVector::ZeroVector, const FVector& ExteriorAxisV = FVector::ZeroVector,
+		const FVector2D& ExteriorOffset = FVector2D::ZeroVector);
 
 	void BuildFragmentPhysics();
 	void DestroyFragmentPhysics();

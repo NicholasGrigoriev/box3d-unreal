@@ -181,8 +181,10 @@ ABox3DFracturedActor::ABox3DFracturedActor()
 	ConfigureFragmentComponent(*AttachedMesh);
 }
 
-void ABox3DFracturedActor::BuildRenderGeometry(const FBox3DFragmentData& Fragment, FFragmentRenderGeometry& Out)
+void ABox3DFracturedActor::BuildRenderGeometry(const FBox3DFragmentData& Fragment, FFragmentRenderGeometry& Out,
+	const FVector& ExteriorAxisU, const FVector& ExteriorAxisV, const FVector2D& ExteriorOffset)
 {
+	const bool bMappedExterior = !ExteriorAxisU.IsNearlyZero() || !ExteriorAxisV.IsNearlyZero();
 	Out = FFragmentRenderGeometry();
 	int32 CornerCount = 0;
 	for (const FBox3DFragmentFace& Face : Fragment.Faces)
@@ -237,15 +239,34 @@ void ABox3DFracturedActor::BuildRenderGeometry(const FBox3DFragmentData& Fragmen
 		const float BinormalSign =
 			FVector::DotProduct(FVector::CrossProduct(Normal, Tangent), AxisVDir) >= 0.0 ? 1.0f : -1.0f;
 
+		// Exterior faces of mapped cladding: the surface's own UV mapping, tangent frame along its U/V gradients.
+		const bool bMapped = bMappedExterior && Face.NeighborIndex == INDEX_NONE;
+		FVector FaceTangent = Tangent;
+		float FaceBinormalSign = BinormalSign;
+		if (bMapped)
+		{
+			const FVector GradU = ExteriorAxisU - Normal * FVector::DotProduct(Normal, ExteriorAxisU);
+			FaceTangent = GradU.GetSafeNormal(UE_SMALL_NUMBER, Tangent);
+			FaceBinormalSign = FVector::DotProduct(FVector::CrossProduct(Normal, FaceTangent), ExteriorAxisV) >= 0.0 ? 1.0f : -1.0f;
+		}
+
 		const int32 Base = Out.Vertices.Num();
 		for (const int32 VertexIndex : Loop)
 		{
 			const FVector& Position = Fragment.Vertices[VertexIndex];
 			Out.Vertices.Add(Position - Fragment.Centroid);
 			Out.Normals.Add(Normal);
-			Out.Tangents.Add(Tangent);
-			Out.BinormalSigns.Add(BinormalSign);
-			Out.UVs.Emplace(Position[AxisU] / 100.0, Position[AxisV] / 100.0);
+			Out.Tangents.Add(FaceTangent);
+			Out.BinormalSigns.Add(FaceBinormalSign);
+			if (bMapped)
+			{
+				Out.UVs.Emplace(FVector::DotProduct(Position, ExteriorAxisU) + ExteriorOffset.X,
+					FVector::DotProduct(Position, ExteriorAxisV) + ExteriorOffset.Y);
+			}
+			else
+			{
+				Out.UVs.Emplace(Position[AxisU] / 100.0, Position[AxisV] / 100.0);
+			}
 		}
 
 		// Fragment faces wind CCW from outside (the b3 convention); UE renders
@@ -278,7 +299,7 @@ void ABox3DFracturedActor::InitializeFragments(TArray<FBox3DFragmentData>&& InFr
 	{
 		if (FragmentTiers[Index] == EBox3DFragmentTier::Body)
 		{
-			BuildRenderGeometry(Fragments[Index], RenderGeometry[Index]);
+			BuildRenderGeometry(Fragments[Index], RenderGeometry[Index], ExteriorUVAxisU, ExteriorUVAxisV, ExteriorUVOffset);
 		}
 	}
 	FragmentComponents.Init(nullptr, Fragments.Num());
@@ -1564,6 +1585,9 @@ namespace Box3D
 		Actor->bFragmentsCastShadow = Params.bCastShadow;
 		Actor->bFragmentsAffectIndirectLighting = Params.bAffectIndirectLighting;
 		Actor->bFragmentsReceiveDecals = Params.bReceivesDecals;
+		Actor->ExteriorUVAxisU = Params.ExteriorUVAxisU;
+		Actor->ExteriorUVAxisV = Params.ExteriorUVAxisV;
+		Actor->ExteriorUVOffset = Params.ExteriorUVOffset;
 		// Fragment/actor space impact, already converted for the fracture core.
 		Actor->DebrisImpactPoint = LocalImpactPoint;
 		Actor->InitializeFragments(MoveTemp(Fragments), SourceMaterial, bCreatePhysics);

@@ -1,6 +1,7 @@
 #include "Box3DCooking.h"
 
 #include "Box3DConversion.h"
+#include "Box3DMeshCollisionOptions.h"
 #include "Box3DRuntime.h"
 #include "Engine/StaticMesh.h"
 #include "PhysicsEngine/BodySetup.h"
@@ -16,7 +17,28 @@ namespace
 	TMap<FObjectKey, b3MeshData*> GMeshCache;
 	TMap<FObjectKey, b3HullData*> GHullCache;
 
-	bool GetLOD0Geometry(UStaticMesh* Mesh, TArray<b3Vec3>& OutVertices, TArray<int32>& OutIndices)
+	/// Material indices whose sections UBox3DMeshCollisionOptions leaves out of the cooked triangle mesh.
+	TSet<int32> ExcludedMaterialIndices(UStaticMesh* Mesh)
+	{
+		TSet<int32> Excluded;
+		const UBox3DMeshCollisionOptions* Options = Cast<UBox3DMeshCollisionOptions>(
+			Mesh->GetAssetUserDataOfClass(UBox3DMeshCollisionOptions::StaticClass()));
+		if (Options && !Options->ExcludedMaterialSlots.IsEmpty())
+		{
+			const TArray<FStaticMaterial>& Materials = Mesh->GetStaticMaterials();
+			for (int32 Index = 0; Index < Materials.Num(); ++Index)
+			{
+				if (Options->ExcludedMaterialSlots.Contains(Materials[Index].MaterialSlotName))
+				{
+					Excluded.Add(Index);
+				}
+			}
+		}
+		return Excluded;
+	}
+
+	bool GetLOD0Geometry(UStaticMesh* Mesh, TArray<b3Vec3>& OutVertices, TArray<int32>& OutIndices,
+		bool bApplyCollisionOptions = false)
 	{
 		const FStaticMeshRenderData* RenderData = Mesh->GetRenderData();
 		if (RenderData == nullptr || RenderData->LODResources.IsEmpty())
@@ -46,6 +68,24 @@ namespace
 			return false;
 		}
 
+		// Per triangle: kept unless its section's material slot is excluded (UBox3DMeshCollisionOptions).
+		TBitArray<> Keep(true, TriangleCount);
+		if (bApplyCollisionOptions)
+		{
+			const TSet<int32> Excluded = ExcludedMaterialIndices(Mesh);
+			for (const FStaticMeshSection& Section : LOD.Sections)
+			{
+				if (Excluded.Contains(Section.MaterialIndex))
+				{
+					const int32 First = static_cast<int32>(Section.FirstIndex / 3);
+					for (uint32 Triangle = 0; Triangle < Section.NumTriangles && First + static_cast<int32>(Triangle) < TriangleCount; ++Triangle)
+					{
+						Keep[First + Triangle] = false;
+					}
+				}
+			}
+		}
+
 		// UE winds triangles clockwise viewed from outside; box3d expects the
 		// reverse, so flipped winding turns every face inward (bodies fall through
 		// the top and rest on the inside of the bottom). Swap two indices per
@@ -53,11 +93,15 @@ namespace
 		OutIndices.Reserve(TriangleCount * 3);
 		for (int32 Triangle = 0; Triangle < TriangleCount; ++Triangle)
 		{
+			if (!Keep[Triangle])
+			{
+				continue;
+			}
 			OutIndices.Add(static_cast<int32>(RawIndices[Triangle * 3 + 0]));
 			OutIndices.Add(static_cast<int32>(RawIndices[Triangle * 3 + 2]));
 			OutIndices.Add(static_cast<int32>(RawIndices[Triangle * 3 + 1]));
 		}
-		return true;
+		return !OutIndices.IsEmpty();
 	}
 }
 
@@ -140,7 +184,7 @@ namespace Box3D
 
 		TArray<b3Vec3> Vertices;
 		TArray<int32> Indices;
-		if (!GetLOD0Geometry(Mesh, Vertices, Indices))
+		if (!GetLOD0Geometry(Mesh, Vertices, Indices, /*bApplyCollisionOptions*/ true))
 		{
 			UE_LOG(LogBox3D, Warning, TEXT("Box3D mesh cook failed for %s: no accessible LOD0 geometry"),
 				*GetNameSafe(Mesh));
